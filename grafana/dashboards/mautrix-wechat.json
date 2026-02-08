@@ -1,0 +1,159 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Connection Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "mautrix_wechat_connected", "legendFormat": "Connected" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Disconnected", "color": "red" }, "1": { "text": "Connected", "color": "green" } } }
+          ],
+          "thresholds": { "steps": [{ "value": null, "color": "red" }, { "value": 1, "color": "green" }] }
+        }
+      }
+    },
+    {
+      "title": "Login State",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "expr": "mautrix_wechat_login_state", "legendFormat": "State" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Logged Out" }, "1": { "text": "QR Code" }, "2": { "text": "Confirming" }, "3": { "text": "Logged In", "color": "green" }, "4": { "text": "Error", "color": "red" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "mautrix_wechat_uptime_seconds", "legendFormat": "Uptime" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Active Users",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "mautrix_wechat_active_users", "legendFormat": "Users" }
+      ]
+    },
+    {
+      "title": "Puppets Created",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        { "expr": "mautrix_wechat_puppets_created_total", "legendFormat": "Puppets" }
+      ]
+    },
+    {
+      "title": "Rooms Created",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        { "expr": "mautrix_wechat_rooms_created_total", "legendFormat": "Rooms" }
+      ]
+    },
+    {
+      "title": "Message Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(mautrix_wechat_messages_received_total[5m])", "legendFormat": "Received (WeChat -> Matrix)" },
+        { "expr": "rate(mautrix_wechat_messages_sent_total[5m])", "legendFormat": "Sent (Matrix -> WeChat)" },
+        { "expr": "rate(mautrix_wechat_messages_failed_total[5m])", "legendFormat": "Failed" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Bridging Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, rate(mautrix_wechat_wechat_to_matrix_latency_seconds_bucket[5m]))", "legendFormat": "WX->MX p50" },
+        { "expr": "histogram_quantile(0.95, rate(mautrix_wechat_wechat_to_matrix_latency_seconds_bucket[5m]))", "legendFormat": "WX->MX p95" },
+        { "expr": "histogram_quantile(0.99, rate(mautrix_wechat_wechat_to_matrix_latency_seconds_bucket[5m]))", "legendFormat": "WX->MX p99" },
+        { "expr": "histogram_quantile(0.5, rate(mautrix_wechat_matrix_to_wechat_latency_seconds_bucket[5m]))", "legendFormat": "MX->WX p50" },
+        { "expr": "histogram_quantile(0.95, rate(mautrix_wechat_matrix_to_wechat_latency_seconds_bucket[5m]))", "legendFormat": "MX->WX p95" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Error Rates",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "rate(mautrix_wechat_provider_errors_total[5m])", "legendFormat": "Provider Errors" },
+        { "expr": "rate(mautrix_wechat_encryption_errors_total[5m])", "legendFormat": "Encryption Errors" },
+        { "expr": "rate(mautrix_wechat_risk_control_blocked_total[5m])", "legendFormat": "Risk Control Blocked" },
+        { "expr": "rate(mautrix_wechat_messages_failed_total[5m])", "legendFormat": "Message Failures" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Reconnection Activity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "rate(mautrix_wechat_reconnect_attempts_total[5m])", "legendFormat": "Reconnect Attempts" },
+        { "expr": "rate(mautrix_wechat_reconnect_successes_total[5m])", "legendFormat": "Reconnect Successes" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Media Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        { "expr": "rate(mautrix_wechat_media_uploaded_total[5m])", "legendFormat": "Uploads (to Matrix)" },
+        { "expr": "rate(mautrix_wechat_media_downloaded_total[5m])", "legendFormat": "Downloads (from WeChat)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Messages by Type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        { "expr": "rate(mautrix_wechat_messages_by_type_total[5m])", "legendFormat": "{{ direction }} / {{ msg_type }}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Login Activity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "targets": [
+        { "expr": "rate(mautrix_wechat_login_attempts_total[5m])", "legendFormat": "Login Attempts" },
+        { "expr": "rate(mautrix_wechat_login_successes_total[5m])", "legendFormat": "Login Successes" },
+        { "expr": "rate(mautrix_wechat_login_failures_total[5m])", "legendFormat": "Login Failures" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["wechat", "bridge", "matrix"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "mautrix-wechat Bridge",
+  "uid": "mautrix-wechat-main",
+  "version": 1
+}

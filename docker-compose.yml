@@ -1,0 +1,146 @@
+version: "3.8"
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mautrix_wechat
+      POSTGRES_USER: mautrix_wechat
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - db_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mautrix_wechat"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - bridge_net
+
+  # Redis for session cache and message deduplication
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - bridge_net
+
+  # mautrix-wechat bridge core
+  mautrix-wechat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./configs:/app/config:ro
+      - ./logs:/app/logs
+      - bridge_data:/app/data
+    ports:
+      - "29350:29350"   # AS API
+      - "29352:29352"   # GeWeChat callback
+      - "9110:9110"     # Prometheus metrics + health
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9110/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    secrets:
+      - as_token
+      - hs_token
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - bridge_net
+
+  # GeWeChat iPad protocol service (Tier 2)
+  gewechat:
+    image: gewe/gewechat:latest
+    ports:
+      - "2531:2531"     # HTTP API
+      - "2532:2532"     # WebSocket
+    volumes:
+      - gewechat_data:/app/data
+    environment:
+      - LICENSE_KEY=${GEWECHAT_LICENSE:-}
+    restart: unless-stopped
+    networks:
+      - bridge_net
+    profiles:
+      - ipad
+
+  # Prometheus monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./configs/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - bridge_net
+    profiles:
+      - monitoring
+
+  # Grafana dashboards
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/mautrix-wechat.json
+    restart: unless-stopped
+    networks:
+      - bridge_net
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+  redis_data:
+  bridge_data:
+  gewechat_data:
+  prometheus_data:
+  grafana_data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  as_token:
+    file: ./secrets/as_token
+  hs_token:
+    file: ./secrets/hs_token
+
+networks:
+  bridge_net:
+    driver: bridge

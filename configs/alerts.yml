@@ -1,0 +1,86 @@
+groups:
+  - name: mautrix_wechat_alerts
+    rules:
+      # Bridge disconnected for more than 2 minutes
+      - alert: WeChatBridgeDisconnected
+        expr: mautrix_wechat_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WeChat bridge is disconnected"
+          description: "The bridge has been disconnected from WeChat for more than 2 minutes."
+
+      # High message failure rate (>10% in 5 minutes)
+      - alert: WeChatBridgeHighFailureRate
+        expr: |
+          rate(mautrix_wechat_messages_failed_total[5m])
+          / (rate(mautrix_wechat_messages_sent_total[5m]) + rate(mautrix_wechat_messages_received_total[5m]) + 0.001)
+          > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message failure rate"
+          description: "More than 10% of messages are failing in the last 5 minutes."
+
+      # Too many reconnection attempts (>5 in 10 minutes)
+      - alert: WeChatBridgeReconnectStorm
+        expr: increase(mautrix_wechat_reconnect_attempts_total[10m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent reconnection attempts"
+          description: "The bridge has attempted {{ $value }} reconnections in the last 10 minutes."
+
+      # Provider errors spike
+      - alert: WeChatBridgeProviderErrors
+        expr: increase(mautrix_wechat_provider_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Provider error spike"
+          description: "{{ $value }} provider errors in the last 5 minutes."
+
+      # Risk control blocking messages
+      - alert: WeChatBridgeRiskControlActive
+        expr: increase(mautrix_wechat_risk_control_blocked_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Risk control is blocking messages"
+          description: "{{ $value }} messages blocked by risk control in the last 5 minutes."
+
+      # High bridging latency (>2s p95 for 5 minutes)
+      - alert: WeChatBridgeHighLatency
+        expr: |
+          histogram_quantile(0.95, rate(mautrix_wechat_wechat_to_matrix_latency_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message bridging latency"
+          description: "P95 WeChat-to-Matrix latency exceeds 2 seconds."
+
+      # Login failure
+      - alert: WeChatBridgeLoginFailed
+        expr: mautrix_wechat_login_state == 4
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WeChat bridge login failed"
+          description: "The bridge is in an error login state."
+
+      # Bridge process down (no metrics for 1 minute)
+      - alert: WeChatBridgeDown
+        expr: up{job="mautrix-wechat"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WeChat bridge is down"
+          description: "The bridge process is not responding to scrapes."

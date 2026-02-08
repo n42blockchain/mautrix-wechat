@@ -1,0 +1,36 @@
+# Binaries
+/mautrix-wechat
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build
+/dist/
+/build/
+
+# Config with secrets
+configs/config.yaml
+
+# Secrets
+secrets/
+
+# Logs
+logs/
+*.log
+
+# Data
+/data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
