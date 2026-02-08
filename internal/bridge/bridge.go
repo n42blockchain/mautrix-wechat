@@ -313,31 +313,20 @@ func (b *Bridge) selectProvider() (wechat.Provider, error) {
 }
 
 // buildProviderConfig builds a ProviderConfig from the bridge configuration.
+// Used in non-failover mode; delegates to buildProviderConfigFor with the active provider name.
 func (b *Bridge) buildProviderConfig() *wechat.ProviderConfig {
-	cfg := &wechat.ProviderConfig{
+	// Find the first enabled provider name
+	for _, pn := range b.enabledProviders() {
+		if pn.enabled {
+			return b.buildProviderConfigFor(pn.name)
+		}
+	}
+
+	// Fallback (should not reach here — validation ensures at least one provider)
+	return &wechat.ProviderConfig{
 		LogLevel: b.Config.Logging.MinLevel,
 		Extra:    make(map[string]string),
 	}
-
-	if b.Config.Providers.WeCom.Enabled {
-		cfg.CorpID = b.Config.Providers.WeCom.CorpID
-		cfg.AppSecret = b.Config.Providers.WeCom.AppSecret
-		cfg.AgentID = b.Config.Providers.WeCom.AgentID
-		cfg.Token = b.Config.Providers.WeCom.Callback.Token
-		cfg.AESKey = b.Config.Providers.WeCom.Callback.AESKey
-	}
-
-	if b.Config.Providers.IPad.Enabled {
-		cfg.APIEndpoint = b.Config.Providers.IPad.APIEndpoint
-		cfg.APIToken = b.Config.Providers.IPad.APIToken
-		cfg.CallbackURL = b.Config.Providers.IPad.CallbackURL
-	}
-
-	if b.Config.Providers.PCHook.Enabled {
-		cfg.RPCPort = 19088 // default
-	}
-
-	return cfg
 }
 
 // startMetricsServer starts a dedicated HTTP server for Prometheus metrics and health checks.

@@ -49,6 +49,9 @@ type Provider struct {
 	stopCh     chan struct{}
 	log        *slog.Logger
 
+	// Risk control engine
+	riskControl *RiskControl
+
 	// Extended APIs
 	moments  *MomentsAPI
 	channels *ChannelsAPI
@@ -92,6 +95,17 @@ func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandle
 
 	// Initialize WebSocket client for real-time message sync
 	p.ws = newWSClient(wsEndpoint, authKey, handler, p.log.With("component", "websocket"))
+
+	// Initialize risk control engine
+	p.riskControl = NewRiskControl(cfg)
+	p.log.Info("risk control initialized",
+		"max_messages_per_day", p.riskControl.maxMessagesPerDay,
+		"max_media_per_day", p.riskControl.maxMediaPerDay,
+		"max_groups_per_day", p.riskControl.maxGroupsPerDay,
+		"max_friends_per_day", p.riskControl.maxFriendsPerDay,
+		"message_interval_ms", p.riskControl.messageIntervalMs,
+		"random_delay", p.riskControl.randomDelay,
+	)
 
 	// Initialize extended APIs
 	p.moments = NewMomentsAPI(p.api)
@@ -346,6 +360,18 @@ func (p *Provider) GetSelf() *wechat.ContactInfo {
 
 // SendText sends a text message via POST /message/SendTextMessage.
 func (p *Provider) SendText(ctx context.Context, toUser string, text string) (string, error) {
+	delay, ok := p.riskControl.CheckMessage()
+	if !ok {
+		return "", fmt.Errorf("send text: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	resp, err := p.api.SendTextMessage(ctx, &sendTextRequest{
 		ToUserName: toUser,
 		Content:    text,
@@ -358,6 +384,18 @@ func (p *Provider) SendText(ctx context.Context, toUser string, text string) (st
 
 // SendImage sends an image via POST /message/SendImageMessage.
 func (p *Provider) SendImage(ctx context.Context, toUser string, data io.Reader, filename string) (string, error) {
+	delay, ok := p.riskControl.CheckMedia()
+	if !ok {
+		return "", fmt.Errorf("send image: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	b64, err := EncodeMediaToBase64(data)
 	if err != nil {
 		return "", fmt.Errorf("encode image: %w", err)
@@ -374,8 +412,18 @@ func (p *Provider) SendImage(ctx context.Context, toUser string, data io.Reader,
 
 // SendVideo sends a video via POST /message/CdnUploadVideo.
 func (p *Provider) SendVideo(ctx context.Context, toUser string, data io.Reader, filename string, thumb io.Reader) (string, error) {
-	// Video is sent as a URL reference; for inline data, first upload then reference.
-	// For now we encode as base64 and send via the video endpoint.
+	delay, ok := p.riskControl.CheckMedia()
+	if !ok {
+		return "", fmt.Errorf("send video: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	resp, err := p.api.CdnUploadVideo(ctx, &sendVideoRequest{
 		ToUserName: toUser,
 	})
@@ -387,6 +435,18 @@ func (p *Provider) SendVideo(ctx context.Context, toUser string, data io.Reader,
 
 // SendVoice sends a voice message via POST /message/SendVoice.
 func (p *Provider) SendVoice(ctx context.Context, toUser string, data io.Reader, duration int) (string, error) {
+	delay, ok := p.riskControl.CheckMedia()
+	if !ok {
+		return "", fmt.Errorf("send voice: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	b64, err := EncodeMediaToBase64(data)
 	if err != nil {
 		return "", fmt.Errorf("encode voice: %w", err)
@@ -404,6 +464,18 @@ func (p *Provider) SendVoice(ctx context.Context, toUser string, data io.Reader,
 
 // SendFile sends a file via POST /message/sendFile.
 func (p *Provider) SendFile(ctx context.Context, toUser string, data io.Reader, filename string) (string, error) {
+	delay, ok := p.riskControl.CheckMedia()
+	if !ok {
+		return "", fmt.Errorf("send file: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	resp, err := p.api.SendFile(ctx, &sendFileRequest{
 		ToUserName: toUser,
 		FileName:   filename,
@@ -416,17 +488,57 @@ func (p *Provider) SendFile(ctx context.Context, toUser string, data io.Reader, 
 
 // SendLocation sends a location message. WeChatPadPro doesn't have a dedicated
 // location endpoint, so we format it as a text message with coordinates.
+// Note: delegates to the API directly (not via p.SendText) to avoid double risk control counting.
 func (p *Provider) SendLocation(ctx context.Context, toUser string, loc *wechat.LocationInfo) (string, error) {
+	delay, ok := p.riskControl.CheckMessage()
+	if !ok {
+		return "", fmt.Errorf("send location: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	text := fmt.Sprintf("[Location] %s\n%s\nhttps://uri.amap.com/marker?position=%f,%f",
 		loc.Poiname, loc.Label, loc.Longitude, loc.Latitude)
-	return p.SendText(ctx, toUser, text)
+	resp, err := p.api.SendTextMessage(ctx, &sendTextRequest{
+		ToUserName: toUser,
+		Content:    text,
+	})
+	if err != nil {
+		return "", fmt.Errorf("send location: %w", err)
+	}
+	return formatMsgID(resp), nil
 }
 
 // SendLink sends a link card message. WeChatPadPro doesn't have a direct link card
 // endpoint for personal chats, so we format it as a rich text message.
+// Note: delegates to the API directly (not via p.SendText) to avoid double risk control counting.
 func (p *Provider) SendLink(ctx context.Context, toUser string, link *wechat.LinkCardInfo) (string, error) {
+	delay, ok := p.riskControl.CheckMessage()
+	if !ok {
+		return "", fmt.Errorf("send link: rate limited (%s)", p.riskControl.StatsString())
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	text := fmt.Sprintf("[Link] %s\n%s\n%s", link.Title, link.Description, link.URL)
-	return p.SendText(ctx, toUser, text)
+	resp, err := p.api.SendTextMessage(ctx, &sendTextRequest{
+		ToUserName: toUser,
+		Content:    text,
+	})
+	if err != nil {
+		return "", fmt.Errorf("send link: %w", err)
+	}
+	return formatMsgID(resp), nil
 }
 
 // RevokeMessage revokes a sent message via POST /message/RevokeMsg.
@@ -530,8 +642,9 @@ func (p *Provider) GetUserAvatar(ctx context.Context, userID string) ([]byte, st
 // AcceptFriendRequest accepts a friend request.
 // Uses: POST /friend/AgreeAdd
 func (p *Provider) AcceptFriendRequest(ctx context.Context, xml string) error {
-	// The xml parameter contains the encrypted user name and ticket from the friend request
-	// Parse them from the XML or pass directly
+	if !p.riskControl.CheckFriendOperation() {
+		return fmt.Errorf("accept friend: rate limited (%s)", p.riskControl.StatsString())
+	}
 	return p.api.AgreeAdd(ctx, xml, "", 3)
 }
 
@@ -600,6 +713,10 @@ func (p *Provider) GetGroupInfo(ctx context.Context, groupID string) (*wechat.Co
 // Uses: POST /group/CreateChatRoom
 // Note: WeChat requires at least 3 members (including self) to create a group.
 func (p *Provider) CreateGroup(ctx context.Context, name string, members []string) (string, error) {
+	if !p.riskControl.CheckGroupOperation() {
+		return "", fmt.Errorf("create group: rate limited (%s)", p.riskControl.StatsString())
+	}
+
 	resp, err := p.api.CreateChatRoom(ctx, members)
 	if err != nil {
 		return "", fmt.Errorf("create group: %w", err)
@@ -618,12 +735,18 @@ func (p *Provider) CreateGroup(ctx context.Context, name string, members []strin
 // InviteToGroup invites users to a group.
 // Uses: POST /group/AddChatRoomMembers
 func (p *Provider) InviteToGroup(ctx context.Context, groupID string, userIDs []string) error {
+	if !p.riskControl.CheckGroupOperation() {
+		return fmt.Errorf("invite to group: rate limited (%s)", p.riskControl.StatsString())
+	}
 	return p.api.AddChatRoomMembers(ctx, groupID, userIDs)
 }
 
 // RemoveFromGroup removes users from a group.
 // Uses: POST /group/DelChatRoomMembers
 func (p *Provider) RemoveFromGroup(ctx context.Context, groupID string, userIDs []string) error {
+	if !p.riskControl.CheckGroupOperation() {
+		return fmt.Errorf("remove from group: rate limited (%s)", p.riskControl.StatsString())
+	}
 	return p.api.DelChatRoomMembers(ctx, groupID, userIDs)
 }
 
