@@ -134,10 +134,14 @@ providers:
       port: 29351
 
   # Recommended: WeChatPadPro (Pad protocol, successor to GeWeChat)
+  # Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+  # Requires: MySQL 8.0 + Redis 6
   padpro:
     enabled: true
-    api_endpoint: "http://wechatpadpro:8849/api"
-    ws_endpoint: "ws://wechatpadpro:8849/ws"
+    api_endpoint: "http://wechatpadpro:1239"
+    auth_key: "YOUR_PADPRO_AUTH_KEY"
+    # ws_endpoint: ""  # Optional, derived from api_endpoint if empty
+    # webhook_url: "http://bridge:29353/callback"  # Optional webhook callback
     callback_port: 29353
     risk_control:
       new_account_silence_days: 3

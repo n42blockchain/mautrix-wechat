@@ -130,11 +130,18 @@ type WeComCallbackConfig struct {
 }
 
 // PadProProviderConfig holds WeChatPadPro settings (recommended replacement for GeWeChat).
+//
+// WeChatPadPro deployment:
+//   Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+//   External port: 1239
+//   Dependencies: MySQL 8.0 + Redis 6
 type PadProProviderConfig struct {
 	Enabled      bool              `yaml:"enabled"`
-	APIEndpoint  string            `yaml:"api_endpoint"`
-	WSEndpoint   string            `yaml:"ws_endpoint"`
-	CallbackPort int               `yaml:"callback_port"`
+	APIEndpoint  string            `yaml:"api_endpoint"`  // e.g. http://wechatpadpro:1239
+	AuthKey      string            `yaml:"auth_key"`      // API auth key (used as ?key= parameter)
+	WSEndpoint   string            `yaml:"ws_endpoint"`   // optional, derived from api_endpoint if empty
+	WebhookURL   string            `yaml:"webhook_url"`   // optional webhook callback URL
+	CallbackPort int               `yaml:"callback_port"` // local port for webhook callback server
 	RiskControl  RiskControlConfig `yaml:"risk_control"`
 }
 
@@ -357,9 +364,10 @@ func (c *Config) Validate() error {
 		if c.Providers.PadPro.APIEndpoint == "" {
 			return fmt.Errorf("providers.padpro.api_endpoint is required when padpro is enabled")
 		}
-		if c.Providers.PadPro.WSEndpoint == "" {
-			return fmt.Errorf("providers.padpro.ws_endpoint is required when padpro is enabled")
+		if c.Providers.PadPro.AuthKey == "" {
+			return fmt.Errorf("providers.padpro.auth_key is required when padpro is enabled")
 		}
+		// ws_endpoint is optional; derived from api_endpoint if not set
 	}
 	if c.Providers.IPad.Enabled {
 		if c.Providers.IPad.APIEndpoint == "" {

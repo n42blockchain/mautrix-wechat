@@ -474,7 +474,13 @@ func (b *Bridge) buildProviderConfigFor(name string) *wechat.ProviderConfig {
 		cfg.AESKey = b.Config.Providers.WeCom.Callback.AESKey
 	case "padpro":
 		cfg.APIEndpoint = b.Config.Providers.PadPro.APIEndpoint
-		cfg.Extra["ws_endpoint"] = b.Config.Providers.PadPro.WSEndpoint
+		cfg.APIToken = b.Config.Providers.PadPro.AuthKey // Used as ?key= query parameter
+		if b.Config.Providers.PadPro.WSEndpoint != "" {
+			cfg.Extra["ws_endpoint"] = b.Config.Providers.PadPro.WSEndpoint
+		}
+		if b.Config.Providers.PadPro.WebhookURL != "" {
+			cfg.Extra["webhook_url"] = b.Config.Providers.PadPro.WebhookURL
+		}
 		if b.Config.Providers.PadPro.CallbackPort > 0 {
 			cfg.Extra["callback_port"] = fmt.Sprintf("%d", b.Config.Providers.PadPro.CallbackPort)
 		}

@@ -76,18 +76,52 @@ services:
       - bridge_net
 
   # WeChatPadPro Pad protocol service (Tier 2, recommended)
+  # Image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+  # External port: 1239, requires MySQL 8.0 + Redis 6
   wechatpadpro:
-    image: wechatpadpro/wechatpadpro:latest
+    image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+    depends_on:
+      padpro-mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
-      - "8849:8849"     # REST API + WebSocket
+      - "1239:1239"     # REST API + WebSocket
     volumes:
       - padpro_data:/app/data
     environment:
-      - ADMIN_PASSWORD=${PADPRO_ADMIN_PASSWORD:-admin}
+      - MYSQL_HOST=padpro-mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=padpro
+      - MYSQL_PASSWORD=${PADPRO_MYSQL_PASSWORD:-padpro123}
+      - MYSQL_DATABASE=padpro
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme}
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8849/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:1239/health"]
       interval: 30s
       retries: 3
+    restart: unless-stopped
+    networks:
+      - bridge_net
+    profiles:
+      - padpro
+
+  # MySQL for WeChatPadPro (required dependency)
+  padpro-mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${PADPRO_MYSQL_ROOT_PASSWORD:-root123}
+      MYSQL_DATABASE: padpro
+      MYSQL_USER: padpro
+      MYSQL_PASSWORD: ${PADPRO_MYSQL_PASSWORD:-padpro123}
+    volumes:
+      - padpro_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      retries: 5
     restart: unless-stopped
     networks:
       - bridge_net
@@ -151,6 +185,7 @@ volumes:
   redis_data:
   bridge_data:
   padpro_data:
+  padpro_mysql_data:
   gewechat_data:
   prometheus_data:
   grafana_data:

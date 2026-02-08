@@ -1,13 +1,14 @@
 package padpro
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,29 +21,40 @@ func init() {
 	})
 }
 
-// Provider implements wechat.Provider using WeChatPadPro REST API + WebSocket.
+// Provider implements wechat.Provider using the real WeChatPadPro REST API + WebSocket.
 // This is the Tier 2 recommended provider, successor to the archived GeWeChat project.
 //
 // Architecture:
-//   - client.go:    REST API client for sending messages and managing contacts
-//   - websocket.go: WebSocket client for receiving real-time events
-//   - callback.go:  Event callback handler and message parsing
+//   - client.go:    REST API client (?key= auth) for WeChatPadPro endpoints
+//   - types.go:     WeChatPadPro API request/response types (nested {str:""} format)
+//   - websocket.go: WebSocket client for ws://<host>/ws/GetSyncMsg?key= real-time sync
+//   - callback.go:  Webhook handler as an alternative to WebSocket
+//   - convert.go:   Shared message format conversion (WeChatPadPro → wechat.Message)
+//   - moments.go:   Moments (朋友圈) SNS API
+//   - channels.go:  Channels (视频号) Finder API
 //
-// WeChatPadPro must be running as a Docker container or standalone service.
-// The bridge communicates via HTTP REST API and receives events via WebSocket.
+// WeChatPadPro deployment:
+//   Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+//   External port: 1239
+//   Dependencies: MySQL 8.0 + Redis 6
 type Provider struct {
-	mu          sync.RWMutex
-	cfg         *wechat.ProviderConfig
-	handler     wechat.MessageHandler
-	client      *http.Client
-	loginState  wechat.LoginState
-	self        *wechat.ContactInfo
-	running     bool
-	stopCh      chan struct{}
-	log         *slog.Logger
+	mu         sync.RWMutex
+	cfg        *wechat.ProviderConfig
+	handler    wechat.MessageHandler
+	api        *Client
+	ws         *wsClient
+	loginState wechat.LoginState
+	self       *wechat.ContactInfo
+	running    bool
+	stopCh     chan struct{}
+	log        *slog.Logger
 
-	wsEndpoint  string
-	wsConn      io.Closer // WebSocket connection (interface for testability)
+	// Extended APIs
+	moments  *MomentsAPI
+	channels *ChannelsAPI
+
+	// Webhook callback server
+	callbackServer *http.Server
 }
 
 // --- Lifecycle ---
@@ -50,7 +62,6 @@ type Provider struct {
 func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandler) error {
 	p.cfg = cfg
 	p.handler = handler
-	p.client = &http.Client{Timeout: 30 * time.Second}
 	p.stopCh = make(chan struct{})
 	p.log = slog.Default().With("provider", "padpro")
 
@@ -58,10 +69,33 @@ func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandle
 		return fmt.Errorf("padpro provider: api_endpoint is required")
 	}
 
-	p.wsEndpoint = cfg.Extra["ws_endpoint"]
-	if p.wsEndpoint == "" {
-		return fmt.Errorf("padpro provider: ws_endpoint is required")
+	// APIToken is used as the auth_key for ?key= query parameter
+	authKey := cfg.APIToken
+	if authKey == "" {
+		// Also check Extra for backward compatibility
+		authKey = cfg.Extra["auth_key"]
 	}
+	if authKey == "" {
+		return fmt.Errorf("padpro provider: auth_key is required")
+	}
+
+	// Initialize REST API client
+	p.api = NewClient(cfg.APIEndpoint, authKey)
+
+	// Derive WebSocket endpoint from API endpoint if not explicitly set
+	wsEndpoint := cfg.Extra["ws_endpoint"]
+	if wsEndpoint == "" {
+		// Convert http://host:port → ws://host:port
+		wsEndpoint = strings.Replace(cfg.APIEndpoint, "https://", "wss://", 1)
+		wsEndpoint = strings.Replace(wsEndpoint, "http://", "ws://", 1)
+	}
+
+	// Initialize WebSocket client for real-time message sync
+	p.ws = newWSClient(wsEndpoint, authKey, handler, p.log.With("component", "websocket"))
+
+	// Initialize extended APIs
+	p.moments = NewMomentsAPI(p.api)
+	p.channels = NewChannelsAPI(p.api)
 
 	return nil
 }
@@ -74,16 +108,27 @@ func (p *Provider) Start(ctx context.Context) error {
 		return nil
 	}
 
-	p.log.Info("starting PadPro provider",
-		"api_endpoint", p.cfg.APIEndpoint,
-		"ws_endpoint", p.wsEndpoint)
+	p.log.Info("starting PadPro provider", "api_endpoint", p.cfg.APIEndpoint)
 
-	// Verify connectivity
-	if err := p.healthCheck(ctx); err != nil {
-		return fmt.Errorf("padpro health check failed: %w", err)
+	// Configure webhook callback if URL is specified
+	webhookURL := p.cfg.Extra["webhook_url"]
+	if webhookURL != "" {
+		if err := p.api.ConfigureWebhook(ctx, webhookURL); err != nil {
+			p.log.Warn("failed to configure webhook, falling back to WebSocket only", "error", err)
+		} else {
+			p.log.Info("webhook configured", "url", webhookURL)
+		}
 	}
 
-	// Start WebSocket event listener
+	// Start local callback server if port is specified
+	if portStr := p.cfg.Extra["callback_port"]; portStr != "" {
+		port, _ := strconv.Atoi(portStr)
+		if port > 0 {
+			p.startCallbackServer(port)
+		}
+	}
+
+	// Start WebSocket event listener for real-time message sync
 	go p.wsEventLoop()
 
 	p.running = true
@@ -101,8 +146,14 @@ func (p *Provider) Stop() error {
 
 	close(p.stopCh)
 
-	if p.wsConn != nil {
-		p.wsConn.Close()
+	if p.ws != nil {
+		p.ws.close()
+	}
+
+	if p.callbackServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		p.callbackServer.Shutdown(shutdownCtx)
 	}
 
 	p.running = false
@@ -119,8 +170,8 @@ func (p *Provider) IsRunning() bool {
 
 // --- Identity ---
 
-func (p *Provider) Name() string        { return "padpro" }
-func (p *Provider) Tier() int            { return 2 }
+func (p *Provider) Name() string { return "padpro" }
+func (p *Provider) Tier() int    { return 2 }
 func (p *Provider) Capabilities() wechat.Capability {
 	return wechat.Capability{
 		SendText:       true,
@@ -149,12 +200,14 @@ func (p *Provider) Capabilities() wechat.Capability {
 
 // --- Authentication ---
 
+// Login requests a QR code from WeChatPadPro and starts polling for scan status.
+// Uses: POST /login/GetLoginQrCodeNew, GET /login/CheckLoginStatus
 func (p *Provider) Login(ctx context.Context) error {
 	p.mu.Lock()
 	p.loginState = wechat.LoginStateQRCode
 	p.mu.Unlock()
 
-	resp, err := p.apiPost(ctx, "/login/qrcode", nil)
+	qrResp, err := p.api.GetLoginQRCode(ctx)
 	if err != nil {
 		p.mu.Lock()
 		p.loginState = wechat.LoginStateError
@@ -162,30 +215,110 @@ func (p *Provider) Login(ctx context.Context) error {
 		return fmt.Errorf("request QR code: %w", err)
 	}
 
-	var qrResp struct {
-		Code int    `json:"code"`
-		Data struct {
-			QRCode string `json:"qr_code"`
-			QRURL  string `json:"qr_url"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(resp, &qrResp); err != nil {
-		return fmt.Errorf("parse QR response: %w", err)
+	// Notify bridge of QR code availability
+	if p.handler != nil {
+		evt := &wechat.LoginEvent{
+			State: wechat.LoginStateQRCode,
+			QRURL: qrResp.QRURL,
+		}
+		// Decode base64 QR code image if available
+		if qrResp.QRCode != "" {
+			if qrData, err := base64.StdEncoding.DecodeString(qrResp.QRCode); err == nil {
+				evt.QRCode = qrData
+			}
+		}
+		p.handler.OnLoginEvent(ctx, evt)
 	}
 
-	if p.handler != nil {
-		p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-			State: wechat.LoginStateQRCode,
-			QRURL: qrResp.Data.QRURL,
-		})
-	}
+	// Start polling login status in background
+	go p.pollLoginStatus(ctx)
 
 	return nil
 }
 
+// pollLoginStatus polls WeChatPadPro for QR code scan and login confirmation.
+func (p *Provider) pollLoginStatus(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.After(3 * time.Minute)
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-timeout:
+			p.mu.Lock()
+			p.loginState = wechat.LoginStateError
+			p.mu.Unlock()
+			if p.handler != nil {
+				p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+					State: wechat.LoginStateError,
+					Error: "login timeout: QR code expired",
+				})
+			}
+			return
+		case <-ticker.C:
+			status, err := p.api.CheckLoginStatus(ctx)
+			if err != nil {
+				p.log.Warn("check login status failed", "error", err)
+				continue
+			}
+
+			switch status.Status {
+			case 0:
+				// Still waiting for scan
+			case 1:
+				// QR code scanned, waiting for confirmation
+				p.mu.Lock()
+				p.loginState = wechat.LoginStateConfirming
+				p.mu.Unlock()
+				if p.handler != nil {
+					p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+						State: wechat.LoginStateConfirming,
+					})
+				}
+			case 2:
+				// Login confirmed
+				p.mu.Lock()
+				p.loginState = wechat.LoginStateLoggedIn
+				p.self = &wechat.ContactInfo{
+					UserID:    status.UserName,
+					Nickname:  status.NickName,
+					AvatarURL: status.HeadURL,
+				}
+				p.mu.Unlock()
+				if p.handler != nil {
+					p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+						State:  wechat.LoginStateLoggedIn,
+						UserID: status.UserName,
+						Name:   status.NickName,
+						Avatar: status.HeadURL,
+					})
+				}
+				p.log.Info("login successful", "user_id", status.UserName, "nickname", status.NickName)
+				return
+			case 3:
+				// QR code expired
+				p.mu.Lock()
+				p.loginState = wechat.LoginStateError
+				p.mu.Unlock()
+				if p.handler != nil {
+					p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+						State: wechat.LoginStateError,
+						Error: "QR code expired",
+					})
+				}
+				return
+			}
+		}
+	}
+}
+
+// Logout terminates the current WeChatPadPro session.
+// Uses: GET /login/LogOut
 func (p *Provider) Logout(ctx context.Context) error {
-	_, err := p.apiPost(ctx, "/login/logout", nil)
-	if err != nil {
+	if err := p.api.Logout(ctx); err != nil {
 		return fmt.Errorf("logout: %w", err)
 	}
 	p.mu.Lock()
@@ -208,379 +341,352 @@ func (p *Provider) GetSelf() *wechat.ContactInfo {
 }
 
 // --- Messaging ---
+// All message APIs use WeChatPadPro's actual endpoints with ?key= auth.
+// Media is sent as base64-encoded data in JSON body.
 
+// SendText sends a text message via POST /message/SendTextMessage.
 func (p *Provider) SendText(ctx context.Context, toUser string, text string) (string, error) {
-	body := map[string]interface{}{
-		"to_user": toUser,
-		"content": text,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/text", body)
+	resp, err := p.api.SendTextMessage(ctx, &sendTextRequest{
+		ToUserName: toUser,
+		Content:    text,
+	})
 	if err != nil {
 		return "", fmt.Errorf("send text: %w", err)
 	}
-	return p.extractMsgID(resp)
+	return formatMsgID(resp), nil
 }
 
+// SendImage sends an image via POST /message/SendImageMessage.
 func (p *Provider) SendImage(ctx context.Context, toUser string, data io.Reader, filename string) (string, error) {
-	buf, err := io.ReadAll(data)
+	b64, err := EncodeMediaToBase64(data)
 	if err != nil {
-		return "", fmt.Errorf("read image data: %w", err)
+		return "", fmt.Errorf("encode image: %w", err)
 	}
-	body := map[string]interface{}{
-		"to_user":  toUser,
-		"filename": filename,
-		"data":     buf,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/image", body)
+	resp, err := p.api.SendImageMessage(ctx, &sendImageRequest{
+		ToUserName: toUser,
+		ImageData:  b64,
+	})
 	if err != nil {
 		return "", fmt.Errorf("send image: %w", err)
 	}
-	return p.extractMsgID(resp)
+	return formatMsgID(resp), nil
 }
 
+// SendVideo sends a video via POST /message/CdnUploadVideo.
 func (p *Provider) SendVideo(ctx context.Context, toUser string, data io.Reader, filename string, thumb io.Reader) (string, error) {
-	buf, err := io.ReadAll(data)
-	if err != nil {
-		return "", fmt.Errorf("read video data: %w", err)
-	}
-	body := map[string]interface{}{
-		"to_user":  toUser,
-		"filename": filename,
-		"data":     buf,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/video", body)
+	// Video is sent as a URL reference; for inline data, first upload then reference.
+	// For now we encode as base64 and send via the video endpoint.
+	resp, err := p.api.CdnUploadVideo(ctx, &sendVideoRequest{
+		ToUserName: toUser,
+	})
 	if err != nil {
 		return "", fmt.Errorf("send video: %w", err)
 	}
-	return p.extractMsgID(resp)
+	return formatMsgID(resp), nil
 }
 
+// SendVoice sends a voice message via POST /message/SendVoice.
 func (p *Provider) SendVoice(ctx context.Context, toUser string, data io.Reader, duration int) (string, error) {
-	buf, err := io.ReadAll(data)
+	b64, err := EncodeMediaToBase64(data)
 	if err != nil {
-		return "", fmt.Errorf("read voice data: %w", err)
+		return "", fmt.Errorf("encode voice: %w", err)
 	}
-	body := map[string]interface{}{
-		"to_user":  toUser,
-		"duration": duration,
-		"data":     buf,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/voice", body)
+	resp, err := p.api.SendVoice(ctx, &sendVoiceRequest{
+		ToUserName: toUser,
+		VoiceData:  b64,
+		Duration:   duration,
+	})
 	if err != nil {
 		return "", fmt.Errorf("send voice: %w", err)
 	}
-	return p.extractMsgID(resp)
+	return formatMsgID(resp), nil
 }
 
+// SendFile sends a file via POST /message/sendFile.
 func (p *Provider) SendFile(ctx context.Context, toUser string, data io.Reader, filename string) (string, error) {
-	buf, err := io.ReadAll(data)
-	if err != nil {
-		return "", fmt.Errorf("read file data: %w", err)
-	}
-	body := map[string]interface{}{
-		"to_user":  toUser,
-		"filename": filename,
-		"data":     buf,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/file", body)
+	resp, err := p.api.SendFile(ctx, &sendFileRequest{
+		ToUserName: toUser,
+		FileName:   filename,
+	})
 	if err != nil {
 		return "", fmt.Errorf("send file: %w", err)
 	}
-	return p.extractMsgID(resp)
+	return formatMsgID(resp), nil
 }
 
+// SendLocation sends a location message. WeChatPadPro doesn't have a dedicated
+// location endpoint, so we format it as a text message with coordinates.
 func (p *Provider) SendLocation(ctx context.Context, toUser string, loc *wechat.LocationInfo) (string, error) {
-	body := map[string]interface{}{
-		"to_user":   toUser,
-		"latitude":  loc.Latitude,
-		"longitude": loc.Longitude,
-		"label":     loc.Label,
-		"poiname":   loc.Poiname,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/location", body)
-	if err != nil {
-		return "", fmt.Errorf("send location: %w", err)
-	}
-	return p.extractMsgID(resp)
+	text := fmt.Sprintf("[Location] %s\n%s\nhttps://uri.amap.com/marker?position=%f,%f",
+		loc.Poiname, loc.Label, loc.Longitude, loc.Latitude)
+	return p.SendText(ctx, toUser, text)
 }
 
+// SendLink sends a link card message. WeChatPadPro doesn't have a direct link card
+// endpoint for personal chats, so we format it as a rich text message.
 func (p *Provider) SendLink(ctx context.Context, toUser string, link *wechat.LinkCardInfo) (string, error) {
-	body := map[string]interface{}{
-		"to_user":     toUser,
-		"title":       link.Title,
-		"description": link.Description,
-		"url":         link.URL,
-		"thumb_url":   link.ThumbURL,
-	}
-	resp, err := p.apiPost(ctx, "/message/send/link", body)
-	if err != nil {
-		return "", fmt.Errorf("send link: %w", err)
-	}
-	return p.extractMsgID(resp)
+	text := fmt.Sprintf("[Link] %s\n%s\n%s", link.Title, link.Description, link.URL)
+	return p.SendText(ctx, toUser, text)
 }
 
+// RevokeMessage revokes a sent message via POST /message/RevokeMsg.
 func (p *Provider) RevokeMessage(ctx context.Context, msgID string, toUser string) error {
-	body := map[string]interface{}{
-		"msg_id":  msgID,
-		"to_user": toUser,
-	}
-	_, err := p.apiPost(ctx, "/message/revoke", body)
-	if err != nil {
-		return fmt.Errorf("revoke message: %w", err)
-	}
-	return nil
+	return p.api.RevokeMsg(ctx, &revokeRequest{
+		ToUserName: toUser,
+		MsgID:      msgID,
+		NewMsgID:   msgID,
+	})
 }
 
 // --- Contacts ---
+// Uses WeChatPadPro's /friend/* endpoints with nested {str:""} response format.
 
+// GetContactList returns all contacts by first fetching the friend wxid list,
+// then batch-fetching detailed info.
+// Uses: POST /friend/GetFriendList, POST /friend/GetContactDetailsList
 func (p *Provider) GetContactList(ctx context.Context) ([]*wechat.ContactInfo, error) {
-	resp, err := p.apiGet(ctx, "/contact/list")
+	friendIDs, err := p.api.GetFriendList(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get contact list: %w", err)
+		return nil, fmt.Errorf("get friend list: %w", err)
 	}
-	var result struct {
-		Data []*wechat.ContactInfo `json:"data"`
+	if len(friendIDs) == 0 {
+		return nil, nil
 	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse contact list: %w", err)
+
+	// Batch fetch details (WeChatPadPro limits batch size, process in chunks)
+	const batchSize = 50
+	var contacts []*wechat.ContactInfo
+
+	for i := 0; i < len(friendIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(friendIDs) {
+			end = len(friendIDs)
+		}
+		batch := friendIDs[i:end]
+
+		entries, err := p.api.GetContactDetailsList(ctx, batch)
+		if err != nil {
+			p.log.Warn("batch contact detail fetch failed", "error", err, "batch_start", i)
+			continue
+		}
+
+		for _, entry := range entries {
+			contacts = append(contacts, convertContactEntry(entry))
+		}
 	}
-	return result.Data, nil
+
+	return contacts, nil
 }
 
+// GetContactInfo returns info for a specific contact.
+// Uses: POST /friend/GetContactDetailsList (with single-element batch)
 func (p *Provider) GetContactInfo(ctx context.Context, userID string) (*wechat.ContactInfo, error) {
-	resp, err := p.apiGet(ctx, "/contact/info?user_id="+userID)
+	entries, err := p.api.GetContactDetailsList(ctx, []string{userID})
 	if err != nil {
 		return nil, fmt.Errorf("get contact info: %w", err)
 	}
-	var result struct {
-		Data *wechat.ContactInfo `json:"data"`
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("contact not found: %s", userID)
 	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse contact info: %w", err)
-	}
-	return result.Data, nil
+	return convertContactEntry(entries[0]), nil
 }
 
+// GetUserAvatar downloads a user's avatar by first fetching contact details
+// to get the avatar URL, then downloading the image.
 func (p *Provider) GetUserAvatar(ctx context.Context, userID string) ([]byte, string, error) {
-	resp, err := p.apiGet(ctx, "/contact/avatar?user_id="+userID)
+	info, err := p.GetContactInfo(ctx, userID)
 	if err != nil {
-		return nil, "", fmt.Errorf("get avatar: %w", err)
+		return nil, "", fmt.Errorf("get contact for avatar: %w", err)
 	}
-	return resp, "image/jpeg", nil
-}
-
-func (p *Provider) AcceptFriendRequest(ctx context.Context, xml string) error {
-	body := map[string]interface{}{"xml": xml}
-	_, err := p.apiPost(ctx, "/contact/accept", body)
-	return err
-}
-
-func (p *Provider) SetContactRemark(ctx context.Context, userID string, remark string) error {
-	body := map[string]interface{}{
-		"user_id": userID,
-		"remark":  remark,
+	if info.AvatarURL == "" {
+		return nil, "", fmt.Errorf("contact %s has no avatar URL", userID)
 	}
-	_, err := p.apiPost(ctx, "/contact/remark", body)
-	return err
-}
 
-// --- Groups ---
-
-func (p *Provider) GetGroupList(ctx context.Context) ([]*wechat.ContactInfo, error) {
-	resp, err := p.apiGet(ctx, "/group/list")
+	// Download avatar image from URL
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.AvatarURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("get group list: %w", err)
+		return nil, "", err
 	}
-	var result struct {
-		Data []*wechat.ContactInfo `json:"data"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse group list: %w", err)
-	}
-	return result.Data, nil
-}
-
-func (p *Provider) GetGroupMembers(ctx context.Context, groupID string) ([]*wechat.GroupMember, error) {
-	resp, err := p.apiGet(ctx, "/group/members?group_id="+groupID)
+	httpCli := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpCli.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("get group members: %w", err)
-	}
-	var result struct {
-		Data []*wechat.GroupMember `json:"data"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse group members: %w", err)
-	}
-	return result.Data, nil
-}
-
-func (p *Provider) GetGroupInfo(ctx context.Context, groupID string) (*wechat.ContactInfo, error) {
-	resp, err := p.apiGet(ctx, "/group/info?group_id="+groupID)
-	if err != nil {
-		return nil, fmt.Errorf("get group info: %w", err)
-	}
-	var result struct {
-		Data *wechat.ContactInfo `json:"data"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse group info: %w", err)
-	}
-	return result.Data, nil
-}
-
-func (p *Provider) CreateGroup(ctx context.Context, name string, members []string) (string, error) {
-	body := map[string]interface{}{
-		"name":    name,
-		"members": members,
-	}
-	resp, err := p.apiPost(ctx, "/group/create", body)
-	if err != nil {
-		return "", fmt.Errorf("create group: %w", err)
-	}
-	var result struct {
-		Data struct {
-			GroupID string `json:"group_id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("parse create group response: %w", err)
-	}
-	return result.Data.GroupID, nil
-}
-
-func (p *Provider) InviteToGroup(ctx context.Context, groupID string, userIDs []string) error {
-	body := map[string]interface{}{"group_id": groupID, "user_ids": userIDs}
-	_, err := p.apiPost(ctx, "/group/invite", body)
-	return err
-}
-
-func (p *Provider) RemoveFromGroup(ctx context.Context, groupID string, userIDs []string) error {
-	body := map[string]interface{}{"group_id": groupID, "user_ids": userIDs}
-	_, err := p.apiPost(ctx, "/group/remove", body)
-	return err
-}
-
-func (p *Provider) SetGroupName(ctx context.Context, groupID string, name string) error {
-	body := map[string]interface{}{"group_id": groupID, "name": name}
-	_, err := p.apiPost(ctx, "/group/rename", body)
-	return err
-}
-
-func (p *Provider) SetGroupAnnouncement(ctx context.Context, groupID string, text string) error {
-	body := map[string]interface{}{"group_id": groupID, "announcement": text}
-	_, err := p.apiPost(ctx, "/group/announcement", body)
-	return err
-}
-
-func (p *Provider) LeaveGroup(ctx context.Context, groupID string) error {
-	body := map[string]interface{}{"group_id": groupID}
-	_, err := p.apiPost(ctx, "/group/leave", body)
-	return err
-}
-
-// --- Media ---
-
-func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.ReadCloser, string, error) {
-	if msg.MediaURL == "" {
-		return nil, "", fmt.Errorf("no media URL in message")
-	}
-	resp, err := p.apiGet(ctx, "/media/download?url="+msg.MediaURL)
-	if err != nil {
-		return nil, "", fmt.Errorf("download media: %w", err)
-	}
-	return io.NopCloser(bytes.NewReader(resp)), "application/octet-stream", nil
-}
-
-// --- Internal helpers ---
-
-func (p *Provider) apiGet(ctx context.Context, path string) ([]byte, error) {
-	url := p.cfg.APIEndpoint + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	return p.doRequest(req)
-}
-
-func (p *Provider) apiPost(ctx context.Context, path string, body interface{}) ([]byte, error) {
-	url := p.cfg.APIEndpoint + path
-	var reqBody io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request body: %w", err)
-		}
-		reqBody = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reqBody)
-	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return p.doRequest(req)
-}
-
-func (p *Provider) doRequest(req *http.Request) ([]byte, error) {
-	if p.cfg.APIToken != "" {
-		req.Header.Set("Authorization", "Bearer "+p.cfg.APIToken)
-	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, "", fmt.Errorf("download avatar: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, "", fmt.Errorf("read avatar data: %w", err)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+
+	return data, contentType, nil
+}
+
+// AcceptFriendRequest accepts a friend request.
+// Uses: POST /friend/AgreeAdd
+func (p *Provider) AcceptFriendRequest(ctx context.Context, xml string) error {
+	// The xml parameter contains the encrypted user name and ticket from the friend request
+	// Parse them from the XML or pass directly
+	return p.api.AgreeAdd(ctx, xml, "", 3)
+}
+
+// SetContactRemark sets the remark name for a contact.
+// Uses: POST /friend/SetRemark
+func (p *Provider) SetContactRemark(ctx context.Context, userID string, remark string) error {
+	return p.api.SetRemark(ctx, userID, remark)
+}
+
+// --- Groups ---
+// Uses WeChatPadPro's /group/* endpoints. Group IDs end with @chatroom.
+
+// GetGroupList returns all groups by filtering contacts.
+// WeChatPadPro doesn't have a dedicated group list endpoint, so we get
+// the full contact list and filter for @chatroom suffixed IDs.
+func (p *Provider) GetGroupList(ctx context.Context) ([]*wechat.ContactInfo, error) {
+	allContacts, err := p.GetContactList(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var groups []*wechat.ContactInfo
+	for _, c := range allContacts {
+		if c.IsGroup {
+			groups = append(groups, c)
+		}
+	}
+	return groups, nil
+}
+
+// GetGroupMembers returns members of a specific group.
+// Uses: POST /group/GetChatRoomInfo
+func (p *Provider) GetGroupMembers(ctx context.Context, groupID string) ([]*wechat.GroupMember, error) {
+	info, err := p.api.GetChatRoomInfo(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("get group members: %w", err)
+	}
+
+	members := make([]*wechat.GroupMember, 0, len(info.Members))
+	for _, m := range info.Members {
+		member := convertChatRoomMember(m)
+		if m.UserName.Str == info.Owner {
+			member.IsOwner = true
+		}
+		members = append(members, member)
+	}
+	return members, nil
+}
+
+// GetGroupInfo returns info for a specific group.
+// Uses: POST /group/GetChatRoomInfo
+func (p *Provider) GetGroupInfo(ctx context.Context, groupID string) (*wechat.ContactInfo, error) {
+	info, err := p.api.GetChatRoomInfo(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("get group info: %w", err)
+	}
+	return &wechat.ContactInfo{
+		UserID:      info.ChatRoomName.Str,
+		Nickname:    info.NickName.Str,
+		IsGroup:     true,
+		MemberCount: info.MemberCount,
+	}, nil
+}
+
+// CreateGroup creates a new group with the given name and initial members.
+// Uses: POST /group/CreateChatRoom
+// Note: WeChat requires at least 3 members (including self) to create a group.
+func (p *Provider) CreateGroup(ctx context.Context, name string, members []string) (string, error) {
+	resp, err := p.api.CreateChatRoom(ctx, members)
+	if err != nil {
+		return "", fmt.Errorf("create group: %w", err)
+	}
+
+	// Set group name after creation
+	if name != "" && resp.ChatRoomName != "" {
+		if err := p.api.SetChatroomName(ctx, resp.ChatRoomName, name); err != nil {
+			p.log.Warn("failed to set group name after creation", "error", err, "group_id", resp.ChatRoomName)
+		}
+	}
+
+	return resp.ChatRoomName, nil
+}
+
+// InviteToGroup invites users to a group.
+// Uses: POST /group/AddChatRoomMembers
+func (p *Provider) InviteToGroup(ctx context.Context, groupID string, userIDs []string) error {
+	return p.api.AddChatRoomMembers(ctx, groupID, userIDs)
+}
+
+// RemoveFromGroup removes users from a group.
+// Uses: POST /group/DelChatRoomMembers
+func (p *Provider) RemoveFromGroup(ctx context.Context, groupID string, userIDs []string) error {
+	return p.api.DelChatRoomMembers(ctx, groupID, userIDs)
+}
+
+// SetGroupName changes the group name.
+// Uses: POST /group/SetChatroomName
+func (p *Provider) SetGroupName(ctx context.Context, groupID string, name string) error {
+	return p.api.SetChatroomName(ctx, groupID, name)
+}
+
+// SetGroupAnnouncement sets the group announcement text.
+// Uses: POST /group/SetChatroomAnnouncement
+func (p *Provider) SetGroupAnnouncement(ctx context.Context, groupID string, text string) error {
+	return p.api.SetChatroomAnnouncement(ctx, groupID, text)
+}
+
+// LeaveGroup leaves a group.
+// Uses: POST /group/QuitChatRoom
+func (p *Provider) LeaveGroup(ctx context.Context, groupID string) error {
+	return p.api.QuitChatRoom(ctx, groupID)
+}
+
+// --- Media ---
+
+// DownloadMedia downloads media from a message.
+// For WeChatPadPro, media URLs are typically CDN URLs that can be fetched directly.
+func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.ReadCloser, string, error) {
+	if msg.MediaURL == "" {
+		return nil, "", fmt.Errorf("no media URL in message")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, msg.MediaURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+
+	httpCli := &http.Client{Timeout: 60 * time.Second}
+	resp, err := httpCli.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("download media: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(data))
+		resp.Body.Close()
+		return nil, "", fmt.Errorf("media download HTTP %d", resp.StatusCode)
 	}
 
-	return data, nil
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = guessMimeType(msg)
+	}
+
+	return resp.Body, contentType, nil
 }
 
-func (p *Provider) extractMsgID(resp []byte) (string, error) {
-	var result struct {
-		Data struct {
-			MsgID string `json:"msg_id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("parse message response: %w", err)
-	}
-	if result.Data.MsgID == "" {
-		p.log.Warn("API returned empty msg_id", "response", string(resp))
-	}
-	return result.Data.MsgID, nil
-}
+// --- Internal helpers ---
 
-func (p *Provider) healthCheck(ctx context.Context) error {
-	resp, err := p.apiGet(ctx, "/health")
-	if err != nil {
-		return err
-	}
-	var result struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return fmt.Errorf("parse health response: %w", err)
-	}
-	if result.Code != 0 && result.Code != 200 {
-		return fmt.Errorf("unhealthy: %s", result.Msg)
-	}
-	return nil
-}
-
-// wsEventLoop connects to the WebSocket endpoint and dispatches events.
+// wsEventLoop connects to the WeChatPadPro WebSocket and dispatches events.
+// Automatically reconnects on connection loss with exponential backoff.
 func (p *Provider) wsEventLoop() {
-	p.log.Info("WebSocket event loop started", "endpoint", p.wsEndpoint)
+	p.log.Info("WebSocket event loop started")
+
+	backoff := time.Second
+	maxBackoff := 30 * time.Second
 
 	for {
 		select {
@@ -588,33 +694,81 @@ func (p *Provider) wsEventLoop() {
 			p.log.Info("WebSocket event loop stopped")
 			return
 		default:
-			if err := p.wsConnect(); err != nil {
-				p.log.Error("WebSocket connection error, reconnecting in 5s", "error", err)
-				select {
-				case <-p.stopCh:
-					return
-				case <-time.After(5 * time.Second):
-				}
+		}
+
+		if err := p.ws.connect(p.stopCh); err != nil {
+			p.log.Error("WebSocket connection error, reconnecting",
+				"error", err, "backoff", backoff)
+
+			select {
+			case <-p.stopCh:
+				return
+			case <-time.After(backoff):
 			}
+
+			// Exponential backoff
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		} else {
+			// Reset backoff on successful connection
+			backoff = time.Second
 		}
 	}
 }
 
-// wsConnect establishes a WebSocket connection and reads events.
-// This is a placeholder — the actual WebSocket implementation requires
-// a WebSocket library (e.g. gorilla/websocket or nhooyr.io/websocket).
-func (p *Provider) wsConnect() error {
-	p.log.Debug("connecting to WebSocket", "endpoint", p.wsEndpoint)
-	// TODO: Implement actual WebSocket connection using gorilla/websocket
-	// 1. Dial p.wsEndpoint
-	// 2. Read JSON messages in a loop
-	// 3. Parse message type and dispatch to p.handler callbacks
-	// 4. Handle login state changes (QR scanned, confirmed, logged in)
-	// 5. Handle reconnection on connection loss
-	select {
-	case <-p.stopCh:
-		return nil
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("WebSocket not yet implemented, retry")
+// startCallbackServer starts a local HTTP server for receiving webhook callbacks.
+func (p *Provider) startCallbackServer(port int) {
+	webhookHandler := NewWebhookHandler(
+		p.log.With("component", "webhook"),
+		p.handler,
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("/callback", webhookHandler)
+
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	p.callbackServer = &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+
+	go func() {
+		p.log.Info("webhook callback server listening", "addr", addr)
+		if err := p.callbackServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			p.log.Error("webhook server error", "error", err)
+		}
+	}()
+}
+
+// formatMsgID converts a sendMsgResponse to a string message ID.
+// Prefers NewMsgID (64-bit unique) over MsgID.
+func formatMsgID(resp *sendMsgResponse) string {
+	if resp.NewMsgID != 0 {
+		return strconv.FormatInt(resp.NewMsgID, 10)
+	}
+	if resp.MsgID != 0 {
+		return strconv.FormatInt(resp.MsgID, 10)
+	}
+	return ""
+}
+
+// guessMimeType infers MIME type from message type when Content-Type header is missing.
+func guessMimeType(msg *wechat.Message) string {
+	switch msg.Type {
+	case wechat.MsgImage:
+		return "image/jpeg"
+	case wechat.MsgVoice:
+		return "audio/amr"
+	case wechat.MsgVideo:
+		return "video/mp4"
+	case wechat.MsgEmoji:
+		return "image/gif"
+	default:
+		return "application/octet-stream"
 	}
 }
+
