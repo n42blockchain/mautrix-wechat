@@ -275,11 +275,17 @@ func (b *Bridge) enabledProviders() []struct {
 	name    string
 	enabled bool
 } {
+	// Emit deprecation warning for iPad (GeWeChat) provider
+	if b.Config.Providers.IPad.Enabled {
+		b.Log.Warn("iPad (GeWeChat) provider is DEPRECATED: GeWeChat was archived on 2025-05-03 due to WeChat legal enforcement. Migrate to PadPro provider.")
+	}
+
 	return []struct {
 		name    string
 		enabled bool
 	}{
 		{"wecom", b.Config.Providers.WeCom.Enabled},
+		{"padpro", b.Config.Providers.PadPro.Enabled},
 		{"ipad", b.Config.Providers.IPad.Enabled},
 		{"pchook", b.Config.Providers.PCHook.Enabled},
 	}
@@ -466,6 +472,22 @@ func (b *Bridge) buildProviderConfigFor(name string) *wechat.ProviderConfig {
 		cfg.AgentID = b.Config.Providers.WeCom.AgentID
 		cfg.Token = b.Config.Providers.WeCom.Callback.Token
 		cfg.AESKey = b.Config.Providers.WeCom.Callback.AESKey
+	case "padpro":
+		cfg.APIEndpoint = b.Config.Providers.PadPro.APIEndpoint
+		cfg.Extra["ws_endpoint"] = b.Config.Providers.PadPro.WSEndpoint
+		if b.Config.Providers.PadPro.CallbackPort > 0 {
+			cfg.Extra["callback_port"] = fmt.Sprintf("%d", b.Config.Providers.PadPro.CallbackPort)
+		}
+		// Pass risk control settings via Extra
+		rc := b.Config.Providers.PadPro.RiskControl
+		cfg.Extra["max_messages_per_day"] = fmt.Sprintf("%d", rc.MaxMessagesPerDay)
+		cfg.Extra["max_groups_per_day"] = fmt.Sprintf("%d", rc.MaxGroupsPerDay)
+		cfg.Extra["max_friends_per_day"] = fmt.Sprintf("%d", rc.MaxFriendsPerDay)
+		cfg.Extra["message_interval_ms"] = fmt.Sprintf("%d", rc.MessageIntervalMs)
+		cfg.Extra["new_account_silence_days"] = fmt.Sprintf("%d", rc.NewAccountSilenceDays)
+		if rc.RandomDelay {
+			cfg.Extra["random_delay"] = "true"
+		}
 	case "ipad":
 		cfg.APIEndpoint = b.Config.Providers.IPad.APIEndpoint
 		cfg.APIToken = b.Config.Providers.IPad.APIToken

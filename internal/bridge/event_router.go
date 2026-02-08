@@ -121,7 +121,7 @@ func (er *EventRouter) getProvider() wechat.Provider {
 // HandleMatrixEvent processes an incoming Matrix event and forwards it to WeChat.
 func (er *EventRouter) HandleMatrixEvent(ctx context.Context, evt *MatrixEvent) error {
 	// Ignore events from puppet users (echo prevention)
-	if er.puppets.IsPuppet(evt.Sender) {
+	if er.puppets != nil && er.puppets.IsPuppet(evt.Sender) {
 		return nil
 	}
 

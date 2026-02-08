@@ -97,10 +97,11 @@ type MediaConfig struct {
 
 // ProvidersConfig holds configuration for all provider types.
 type ProvidersConfig struct {
-	WeCom    WeComProviderConfig  `yaml:"wecom"`
-	IPad     IPadProviderConfig   `yaml:"ipad"`
-	PCHook   PCHookProviderConfig `yaml:"pchook"`
-	Failover FailoverConfig       `yaml:"failover"`
+	WeCom    WeComProviderConfig    `yaml:"wecom"`
+	PadPro   PadProProviderConfig   `yaml:"padpro"`
+	IPad     IPadProviderConfig     `yaml:"ipad"`
+	PCHook   PCHookProviderConfig   `yaml:"pchook"`
+	Failover FailoverConfig         `yaml:"failover"`
 }
 
 // FailoverConfig controls automatic provider failover and recovery.
@@ -128,7 +129,17 @@ type WeComCallbackConfig struct {
 	Port   int    `yaml:"port"`
 }
 
+// PadProProviderConfig holds WeChatPadPro settings (recommended replacement for GeWeChat).
+type PadProProviderConfig struct {
+	Enabled      bool              `yaml:"enabled"`
+	APIEndpoint  string            `yaml:"api_endpoint"`
+	WSEndpoint   string            `yaml:"ws_endpoint"`
+	CallbackPort int               `yaml:"callback_port"`
+	RiskControl  RiskControlConfig `yaml:"risk_control"`
+}
+
 // IPadProviderConfig holds iPad protocol (GeWeChat) settings.
+// Deprecated: GeWeChat was archived on 2025-05-03. Use PadPro instead.
 type IPadProviderConfig struct {
 	Enabled      bool              `yaml:"enabled"`
 	APIEndpoint  string            `yaml:"api_endpoint"`
@@ -261,7 +272,27 @@ func (c *Config) Validate() error {
 		c.Bridge.MessageHandling.MaxMessageAge = 300
 	}
 
-	// iPad risk control defaults
+	// PadPro risk control defaults
+	if c.Providers.PadPro.Enabled {
+		rc := &c.Providers.PadPro.RiskControl
+		if rc.NewAccountSilenceDays == 0 {
+			rc.NewAccountSilenceDays = 3
+		}
+		if rc.MaxMessagesPerDay == 0 {
+			rc.MaxMessagesPerDay = 500
+		}
+		if rc.MaxGroupsPerDay == 0 {
+			rc.MaxGroupsPerDay = 10
+		}
+		if rc.MaxFriendsPerDay == 0 {
+			rc.MaxFriendsPerDay = 20
+		}
+		if rc.MessageIntervalMs == 0 {
+			rc.MessageIntervalMs = 1000
+		}
+	}
+
+	// iPad risk control defaults (deprecated provider)
 	if c.Providers.IPad.Enabled {
 		rc := &c.Providers.IPad.RiskControl
 		if rc.NewAccountSilenceDays == 0 {
@@ -309,7 +340,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Ensure at least one provider is enabled
-	if !c.Providers.WeCom.Enabled && !c.Providers.IPad.Enabled && !c.Providers.PCHook.Enabled {
+	if !c.Providers.WeCom.Enabled && !c.Providers.PadPro.Enabled && !c.Providers.IPad.Enabled && !c.Providers.PCHook.Enabled {
 		return fmt.Errorf("at least one provider must be enabled")
 	}
 
@@ -320,6 +351,14 @@ func (c *Config) Validate() error {
 		}
 		if c.Providers.WeCom.AppSecret == "" {
 			return fmt.Errorf("providers.wecom.app_secret is required when wecom is enabled")
+		}
+	}
+	if c.Providers.PadPro.Enabled {
+		if c.Providers.PadPro.APIEndpoint == "" {
+			return fmt.Errorf("providers.padpro.api_endpoint is required when padpro is enabled")
+		}
+		if c.Providers.PadPro.WSEndpoint == "" {
+			return fmt.Errorf("providers.padpro.ws_endpoint is required when padpro is enabled")
 		}
 	}
 	if c.Providers.IPad.Enabled {

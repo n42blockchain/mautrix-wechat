@@ -168,15 +168,47 @@ type Capability struct {
 	SendLink       bool
 	SendMiniApp    bool
 	ReceiveMessage bool
-	GroupManage     bool
+	GroupManage    bool
 	ContactManage  bool
 	MomentAccess   bool
+	MomentRead     bool // Read Moments feed (朋友圈)
+	MomentWrite    bool // Post to Moments (high ban risk)
+	ChannelsRead   bool // Read shared Channels (视频号) content
 	VoiceCall      bool
 	VideoCall      bool
 	Revoke         bool
 	Reaction       bool
 	ReadReceipt    bool
 	Typing         bool
+}
+
+// MomentEntry represents a single Moments (朋友圈) feed entry.
+type MomentEntry struct {
+	MomentID    string            // Unique Moments entry ID
+	UserID      string            // Poster WeChat ID
+	Nickname    string            // Poster display name
+	Content     string            // Text content
+	MediaURLs   []string          // Image/video URLs
+	LinkInfo    *LinkCardInfo     // Shared link (if any)
+	Location    *LocationInfo     // Check-in location (if any)
+	LikeCount   int               // Number of likes
+	CommentCount int              // Number of comments
+	Timestamp   int64             // Post timestamp (ms)
+	Extra       map[string]string // Extension fields
+}
+
+// ChannelsVideo represents a shared Channels (视频号) video.
+type ChannelsVideo struct {
+	VideoID     string // Channels video ID
+	AuthorID    string // Channels author ID
+	AuthorName  string // Author display name
+	Title       string // Video title
+	Description string // Video description
+	CoverURL    string // Cover image URL
+	VideoURL    string // Video playback URL (may be DRM-protected)
+	Duration    int    // Duration in seconds
+	ShareURL    string // Shareable deep link (weixin:// scheme)
+	Timestamp   int64  // Publish timestamp (ms)
 }
 
 // MediaDownload represents a downloaded media file.

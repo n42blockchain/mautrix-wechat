@@ -133,8 +133,23 @@ providers:
       aes_key: "YOUR_AES_KEY"
       port: 29351
 
-  ipad:
+  # Recommended: WeChatPadPro (Pad protocol, successor to GeWeChat)
+  padpro:
     enabled: true
+    api_endpoint: "http://wechatpadpro:8849/api"
+    ws_endpoint: "ws://wechatpadpro:8849/ws"
+    callback_port: 29353
+    risk_control:
+      new_account_silence_days: 3
+      max_messages_per_day: 500
+      max_groups_per_day: 10
+      max_friends_per_day: 20
+      message_interval_ms: 1000
+      random_delay: true
+
+  # DEPRECATED: GeWeChat was archived on 2025-05-03. Migrate to padpro.
+  ipad:
+    enabled: false
     api_endpoint: "http://gewechat:2531/api"
     api_token: "YOUR_GEWECHAT_TOKEN"
     callback_url: "http://bridge:29352/callback"

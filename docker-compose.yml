@@ -54,7 +54,8 @@ services:
       - bridge_data:/app/data
     ports:
       - "29350:29350"   # AS API
-      - "29352:29352"   # GeWeChat callback
+      - "29352:29352"   # GeWeChat callback (deprecated)
+      - "29353:29353"   # PadPro callback
       - "9110:9110"     # Prometheus metrics + health
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9110/health"]
@@ -74,7 +75,27 @@ services:
     networks:
       - bridge_net
 
-  # GeWeChat iPad protocol service (Tier 2)
+  # WeChatPadPro Pad protocol service (Tier 2, recommended)
+  wechatpadpro:
+    image: wechatpadpro/wechatpadpro:latest
+    ports:
+      - "8849:8849"     # REST API + WebSocket
+    volumes:
+      - padpro_data:/app/data
+    environment:
+      - ADMIN_PASSWORD=${PADPRO_ADMIN_PASSWORD:-admin}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8849/health"]
+      interval: 30s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - bridge_net
+    profiles:
+      - padpro
+
+  # GeWeChat iPad protocol service (Tier 2, DEPRECATED)
+  # WARNING: GeWeChat was archived on 2025-05-03. Use wechatpadpro instead.
   gewechat:
     image: gewe/gewechat:latest
     ports:
@@ -129,6 +150,7 @@ volumes:
   postgres_data:
   redis_data:
   bridge_data:
+  padpro_data:
   gewechat_data:
   prometheus_data:
   grafana_data:

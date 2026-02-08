@@ -4,18 +4,32 @@ A Matrix-WeChat bridge that enables bidirectional messaging between [Matrix](htt
 
 ## Features
 
-- **Multi-provider architecture** — three interchangeable WeChat access methods with tiered priority
+- **Multi-provider architecture** — four interchangeable WeChat access methods with tiered priority
 - **Automatic failover** — health monitoring with seamless provider switching and recovery promotion
 - **Rich message support** — text, image, voice, video, file, location, link cards, emoji, mini-app
 - **Group bridging** — group chat sync, member management, @mentions, announcements
 - **Contact sync** — friend list, avatars, remarks, friend request acceptance
+- **Moments & Channels** — partial support for Moments (朋友圈) and Channels (视频号) via select providers
 - **End-to-end encryption** — optional Matrix E2EE (Olm/Megolm) for encrypted rooms
-- **Risk control** — anti-ban protection for iPad protocol (rate limiting, random delays, daily quotas)
+- **Risk control** — anti-ban protection for Pad protocol (rate limiting, random delays, daily quotas)
 - **Voice conversion** — automatic SILK-to-OGG transcoding for voice messages
 - **Prometheus metrics** — request counts, latency histograms, connection state, error rates
 - **Grafana dashboards** — pre-built dashboard for monitoring bridge health
 - **Alerting** — Prometheus alert rules for disconnection, failure spikes, login errors, high latency
 - **Docker deployment** — production-ready Compose stack with health checks and secret management
+
+## Ecosystem Status
+
+> Last updated: 2026-02
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **GeWeChat** | **Archived** (2025-05) | iPad protocol service, shut down due to WeChat legal enforcement. Do NOT use for new deployments. |
+| **WeChatPadPro** | **Active** | Successor to GeWeChat, Pad protocol, REST API + WebSocket, cross-platform Docker deployment. |
+| **WeChatFerry** | **Active** (v39.5.2) | PC Hook via DLL injection, Windows only, supports WeChat 3.9.12.17. |
+| **WeCom API** | **Stable** | Official enterprise API, most stable but enterprise-only. |
+| **mautrix-go bridgev2** | **Standard** (v0.26) | All new mautrix bridges use bridgev2. Migration planned for this project. |
+| **duo/matrix-wechat** | **Outdated** | Uses old mautrix-go, Agent requires WeChat 3.7.0.30 (no longer supported). |
 
 ## Architecture
 
@@ -34,45 +48,122 @@ A Matrix-WeChat bridge that enables bidirectional messaging between [Matrix](htt
 │  │  (HTTP API)  │──│  Matrix ↔ WC │──│  (ghost users)       ││
 │  └─────────────┘  └──────┬───────┘  └──────────────────────┘│
 │                          │                                   │
-│  ┌───────────────────────▼───────────────────────────────┐  │
-│  │              Provider Manager (Failover)              │  │
-│  │  ┌──────────┐   ┌──────────┐   ┌──────────┐          │  │
-│  │  │  WeCom   │   │   iPad   │   │  PC Hook │          │  │
-│  │  │ (Tier 1) │   │ (Tier 2) │   │ (Tier 3) │          │  │
-│  │  └──────────┘   └──────────┘   └──────────┘          │  │
-│  └───────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────▼───────────────────────────────────┐
+│  │              Provider Manager (Failover)                  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
+│  │  │  WeCom   │  │ PadPro   │  │iPad(dep.)│  │ PC Hook  │ │
+│  │  │ (Tier 1) │  │ (Tier 2) │  │ (Tier 2) │  │ (Tier 3) │ │
+│  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘ │
+│  └───────────────────────────────────────────────────────────┘
 │                                                              │
 │  ┌────────────┐  ┌────────────┐  ┌────────────────────────┐ │
 │  │ Encryption │  │  Metrics   │  │     Database (PG)      │ │
-│  │ (Olm/Megolm) │  (Prometheus) │  │ users, rooms, messages │ │
+│  │(Olm/Megolm)│  │(Prometheus)│  │ users, rooms, messages │ │
 │  └────────────┘  └────────────┘  └────────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Providers
 
-| Provider | Tier | Protocol | Platform | Stability | Use Case |
-|----------|------|----------|----------|-----------|----------|
-| **WeCom** | 1 | Official API | Cloud | Highest | Enterprise/internal messaging |
-| **iPad** | 2 | GeWeChat (iPad protocol) | Docker | High | Personal WeChat (recommended) |
-| **PC Hook** | 3 | WeChatFerry RPC | Windows | Medium | Development/testing |
+| Provider | Tier | Protocol | Platform | Stability | Status | Use Case |
+|----------|------|----------|----------|-----------|--------|----------|
+| **WeCom** | 1 | Official API | Cloud | Highest | Stable | Enterprise messaging, Moments marketing |
+| **PadPro** | 2 | WeChatPadPro (Pad) | Docker | High | **Recommended** | Personal WeChat bridging |
+| **iPad** | 2 | GeWeChat (iPad) | Docker | High | **Deprecated** | Legacy; migrate to PadPro |
+| **PC Hook** | 3 | WeChatFerry RPC | Windows | Medium | Active | Dev/testing, Channels access |
 
-### WeCom (Tier 1)
+### WeCom (Tier 1) — Enterprise WeChat
 
-Uses the [WeCom (Enterprise WeChat)](https://work.weixin.qq.com/) official API. Most stable but limited to enterprise scenarios. Requires a WeCom corp account with an application configured for callback events.
+Uses the [WeCom](https://work.weixin.qq.com/) official API. Most stable and legally compliant, but limited to enterprise scenarios.
 
-### iPad Protocol (Tier 2)
+**Capabilities unique to WeCom:**
+- Customer Moments (客户朋友圈) — post marketing content to external contacts' Moments feed
+- Customer Group management at scale
+- Official message template push
+- No risk of account ban (official API)
 
-Uses the [GeWeChat](https://gewechat.com/) iPad protocol service. Recommended for personal WeChat bridging. Includes built-in risk control:
+**Limitations:**
+- Cannot access personal WeChat Moments or Channels
+- Messages only reach WeCom users or linked external contacts
+- No personal friend management
 
-- New account silence period (configurable days)
-- Daily message/group/friend request quotas
-- Minimum message interval with optional random delay
-- Automatic reconnection with exponential backoff
+### PadPro (Tier 2) — WeChatPadPro (Recommended)
 
-### PC Hook (Tier 3)
+Uses [WeChatPadPro](https://github.com/WeChatPadPro/WeChatPadPro), the community successor to the archived GeWeChat project. Based on Pad protocol with REST API + WebSocket.
 
-Uses [WeChatFerry](https://github.com/lich0821/WeChatFerry) via TCP JSON-RPC. Requires a Windows host with WeChat desktop injected. Recommended for development only.
+**Key features:**
+- Cross-platform Docker deployment (Linux, macOS, Windows)
+- Multi-account management
+- REST API + WebSocket for real-time events
+- Web management interface
+- Built-in risk control inherited from bridge config
+
+### iPad Protocol (Tier 2) — GeWeChat (Deprecated)
+
+> **WARNING**: GeWeChat was archived on 2025-05-03 due to WeChat legal enforcement against "unauthorized access to WeChat terminal user data". This provider is retained for existing deployments only. **All new deployments should use PadPro.**
+
+### PC Hook (Tier 3) — WeChatFerry
+
+Uses [WeChatFerry](https://github.com/wechatferry/wechatferry) (v39.5.2) via TCP JSON-RPC. Requires a Windows host with WeChat 3.9.12.17 desktop injected.
+
+**Capabilities unique to PC Hook:**
+- Channels (视频号) content capture — can intercept shared Channels video links and metadata
+- Moments (朋友圈) read access — `getFriendsCircle` API for reading the Moments feed
+- Database access — direct query of local WeChat SQLite databases
+- Full desktop feature parity
+
+**Limitations:**
+- Windows only
+- Requires specific WeChat version (3.9.12.17)
+- DLL injection carries ban risk
+- Not suitable for production without careful isolation
+
+## Moments & Channels Support Matrix
+
+### 朋友圈 (Moments) Support
+
+| Feature | WeCom | PadPro | iPad (dep.) | PC Hook | Notes |
+|---------|:-----:|:------:|:-----------:|:-------:|-------|
+| Read personal Moments | - | Partial | Partial | **Yes** | PC Hook has `getFriendsCircle` API |
+| Read friend Moments | - | Partial | Partial | **Yes** | Protocol-level XML parsing required |
+| Post to Moments | - | Planned | - | - | High ban risk, not recommended for automation |
+| Customer Moments (企业) | **Yes** | - | - | - | WeCom official API, enterprise only |
+| Like/Comment | - | - | - | Partial | PC Hook can trigger UI actions |
+| Moments notifications | - | Partial | Partial | **Yes** | Real-time via message callback |
+
+**Feasibility analysis:**
+- **WeCom**: The only officially supported way to interact with Moments. Limited to "Customer Moments" (客户朋友圈) — posting marketing content to external contacts. Cannot read personal friend Moments.
+- **PC Hook (WeChatFerry)**: Most complete Moments access. The `getFriendsCircle` RPC call returns the Moments feed as parsed XML. Can read text, images, videos, and links. Writing (posting/liking) is possible via UI automation but carries high ban risk.
+- **PadPro/iPad**: Protocol-level support for receiving Moments update notifications. Reading individual Moments entries requires additional API calls. Posting is technically possible but strongly discouraged due to anti-automation detection.
+
+### 视频号 (Channels / Video Accounts) Support
+
+| Feature | WeCom | PadPro | iPad (dep.) | PC Hook | Notes |
+|---------|:-----:|:------:|:-----------:|:-------:|-------|
+| Receive shared Channels links | **Yes** | **Yes** | **Yes** | **Yes** | Parsed as MsgType 49 (link) |
+| Play/preview Channels video | - | - | - | Partial | Requires media URL extraction |
+| Channels live stream notification | - | Partial | Partial | **Yes** | Via system message parsing |
+| Forward Channels content | **Yes** | **Yes** | **Yes** | **Yes** | As link card message |
+| Channels profile lookup | - | - | - | Partial | Via local DB query |
+| Post to Channels | - | - | - | - | Not supported by any provider |
+| Channels comments | - | - | - | - | Not accessible via current protocols |
+
+**Feasibility analysis:**
+- **Channels content is fundamentally a "walled garden"** — WeChat treats Channels as a separate subsystem with its own CDN and DRM. No current protocol provides direct Channels API access.
+- **What works**: All providers can receive and forward shared Channels links (they appear as Type 49 link card messages with `weixin://` deep links). The bridge converts these to Matrix `m.text` events with the video URL.
+- **What doesn't work**: Direct video playback, comment interaction, and posting to Channels require the native WeChat client. These operations cannot be bridged.
+- **PC Hook advantage**: WeChatFerry can intercept the local Channels cache and extract video metadata/thumbnails via SQLite database access, providing richer preview information than other providers.
+
+### Recommendation by Use Case
+
+| Use Case | Recommended Provider | Reason |
+|----------|---------------------|--------|
+| Personal chat bridging | PadPro | Best balance of features and stability |
+| Enterprise messaging | WeCom | Official API, zero ban risk |
+| Moments monitoring | PC Hook | Only provider with full read access |
+| Channels content relay | Any (link forwarding) | All providers forward shared links |
+| Development/testing | PC Hook | Full desktop feature access |
+| Production deployment | WeCom + PadPro (failover) | Enterprise stability + personal coverage |
 
 ## Quick Start
 
@@ -120,11 +211,17 @@ bridge:
     "@admin:your-homeserver.example.com": admin
 
 providers:
-  ipad:
+  # Recommended: WeChatPadPro
+  padpro:
     enabled: true
-    api_endpoint: "http://gewechat:2531/api"
-    callback_url: "http://mautrix-wechat:29352/callback"
-    callback_port: 29352
+    api_endpoint: "http://wechatpadpro:8849/api"
+    ws_endpoint: "ws://wechatpadpro:8849/ws"
+    callback_port: 29353
+
+  # Alternative: WeChatFerry (Windows only)
+  pchook:
+    enabled: false
+    rpc_endpoint: "tcp://windows-host:19088"
 ```
 
 ### 3. Register with Homeserver
@@ -143,14 +240,14 @@ app_service_config_files:
 # Core services only (bridge + database + redis)
 docker compose up -d
 
-# With iPad protocol (GeWeChat)
-docker compose --profile ipad up -d
+# With PadPro provider (recommended)
+docker compose --profile padpro up -d
 
 # With monitoring (Prometheus + Grafana)
 docker compose --profile monitoring up -d
 
 # All services
-docker compose --profile ipad --profile monitoring up -d
+docker compose --profile padpro --profile monitoring up -d
 ```
 
 ### 5. Login
@@ -198,18 +295,15 @@ The bot will reply with a QR code. Scan it with WeChat to complete login.
 
 ### Providers
 
-#### iPad (GeWeChat)
+#### PadPro (WeChatPadPro) — Recommended
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `providers.ipad.enabled` | bool | Enable iPad protocol |
-| `providers.ipad.api_endpoint` | string | GeWeChat HTTP API URL |
-| `providers.ipad.api_token` | string | GeWeChat API token |
-| `providers.ipad.callback_url` | string | Callback URL for receiving messages |
-| `providers.ipad.callback_port` | int | Callback HTTP server port |
-| `providers.ipad.risk_control.max_messages_per_day` | int | Daily message quota (default 500) |
-| `providers.ipad.risk_control.message_interval_ms` | int | Min interval between messages (default 1000) |
-| `providers.ipad.risk_control.random_delay` | bool | Add random delay to intervals |
+| `providers.padpro.enabled` | bool | Enable PadPro provider |
+| `providers.padpro.api_endpoint` | string | WeChatPadPro REST API URL |
+| `providers.padpro.ws_endpoint` | string | WeChatPadPro WebSocket URL |
+| `providers.padpro.callback_port` | int | Callback HTTP server port |
+| `providers.padpro.risk_control.*` | — | Same risk control options as iPad provider |
 
 #### WeCom
 
@@ -222,12 +316,26 @@ The bot will reply with a QR code. Scan it with WeChat to complete login.
 | `providers.wecom.callback.token` | string | Callback verification token |
 | `providers.wecom.callback.aes_key` | string | Callback AES encryption key |
 
+#### iPad (GeWeChat) — Deprecated
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `providers.ipad.enabled` | bool | Enable iPad protocol (**deprecated**, use padpro) |
+| `providers.ipad.api_endpoint` | string | GeWeChat HTTP API URL |
+| `providers.ipad.api_token` | string | GeWeChat API token |
+| `providers.ipad.callback_url` | string | Callback URL for receiving messages |
+| `providers.ipad.callback_port` | int | Callback HTTP server port |
+| `providers.ipad.risk_control.max_messages_per_day` | int | Daily message quota (default 500) |
+| `providers.ipad.risk_control.message_interval_ms` | int | Min interval between messages (default 1000) |
+| `providers.ipad.risk_control.random_delay` | bool | Add random delay to intervals |
+
 #### PC Hook
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `providers.pchook.enabled` | bool | Enable PC Hook provider |
 | `providers.pchook.rpc_endpoint` | string | WeChatFerry RPC endpoint (e.g. `tcp://host:19088`) |
+| `providers.pchook.wechat_version` | string | Target WeChat version (default `3.9.12.17`) |
 
 #### Failover
 
@@ -296,7 +404,7 @@ mautrix-wechat/
 ├── internal/
 │   ├── bridge/                # Core bridge logic
 │   │   ├── bridge.go          # Main orchestrator
-│   │   ├── event_router.go    # Matrix ↔ WeChat event dispatch
+│   │   ├── event_router.go    # Matrix <-> WeChat event dispatch
 │   │   ├── as_handler.go      # Matrix Application Service HTTP handler
 │   │   ├── puppet.go          # Ghost user management
 │   │   ├── encryption.go      # E2EE (Olm/Megolm) helper
@@ -309,17 +417,22 @@ mautrix-wechat/
 │   │   └── migrations/        # SQL migration files
 │   ├── message/               # Message processing (mentions, formatting)
 │   └── provider/
-│       ├── ipad/              # iPad protocol (GeWeChat) provider
+│       ├── padpro/            # WeChatPadPro provider (recommended)
+│       │   ├── provider.go    # Provider implementation
+│       │   ├── client.go      # REST API client
+│       │   ├── websocket.go   # WebSocket event stream
+│       │   └── callback.go    # Message callback handler
+│       ├── ipad/              # iPad protocol / GeWeChat (deprecated)
 │       │   ├── provider.go    # Provider implementation
 │       │   ├── callback.go    # Webhook callback handler
 │       │   ├── reconnect.go   # Auto-reconnection with backoff
 │       │   ├── riskcontrol.go # Anti-ban rate limiting
 │       │   └── voiceconv.go   # SILK voice transcoding
-│       ├── pchook/            # PC Hook (WeChatFerry) provider
+│       ├── pchook/            # PC Hook / WeChatFerry
 │       │   ├── provider.go    # Provider implementation
 │       │   ├── rpcclient.go   # TCP JSON-RPC client
 │       │   └── message.go     # Message serialization
-│       └── wecom/             # WeCom (Enterprise WeChat) provider
+│       └── wecom/             # WeCom (Enterprise WeChat)
 │           ├── provider.go    # Provider implementation
 │           ├── client.go      # API client with token management
 │           ├── callback.go    # Webhook callback server
@@ -375,13 +488,38 @@ go test ./...
 | Voice | `m.audio` | Both |
 | Video | `m.video` | Both |
 | File | `m.file` | Both |
-| Location | `m.location` | WeChat → Matrix |
-| Link/Article | `m.text` (with URL) | WeChat → Matrix |
+| Location | `m.location` | WeChat -> Matrix |
+| Link/Article | `m.text` (with URL) | WeChat -> Matrix |
 | Emoji/Sticker | `m.image` | Both |
-| Contact Card | `m.text` (formatted) | WeChat → Matrix |
-| Mini Program | `m.text` (with URL) | WeChat → Matrix |
+| Contact Card | `m.text` (formatted) | WeChat -> Matrix |
+| Mini Program | `m.text` (with URL) | WeChat -> Matrix |
+| Channels video (shared) | `m.text` (with URL) | WeChat -> Matrix |
+| Moments notification | `m.notice` | WeChat -> Matrix (PC Hook only) |
 | Revoke | `m.room.redaction` | Both |
-| System | `m.notice` | WeChat → Matrix |
+| System | `m.notice` | WeChat -> Matrix |
+
+## Anti-Ban Best Practices
+
+WeChat's anti-automation enforcement has intensified significantly (2024 Q2: +37% daily bans). Follow these guidelines:
+
+1. **New accounts**: Enable `risk_control.new_account_silence_days: 7` (minimum 3 days)
+2. **Message pacing**: Keep `message_interval_ms >= 1000` with `random_delay: true`
+3. **Daily quotas**: Do not exceed `max_messages_per_day: 500` for automated accounts
+4. **Device fingerprint**: Use dedicated IP addresses; avoid VPN/proxy switching
+5. **Login pattern**: Do not repeatedly scan QR codes; use session persistence
+6. **Multi-device**: Follow "1 primary + 3 backup" device strategy for critical accounts
+7. **Protocol choice**: PadPro > PC Hook for ban resistance (Pad protocol is less detectable than DLL injection)
+
+## Roadmap
+
+- [ ] **bridgev2 migration** — Adopt mautrix-go bridgev2 framework (NetworkConnector/NetworkAPI pattern)
+- [ ] **WeChatPadPro provider** — Full implementation with WebSocket real-time events
+- [ ] **Moments bridge** — Read-only Moments feed bridging (PC Hook first, PadPro planned)
+- [ ] **Channels preview** — Rich preview for shared Channels videos (thumbnail + metadata)
+- [ ] **Double puppeting** — Matrix user impersonation for cleaner message display
+- [ ] **Backfill** — Historical message sync on first bridge connection
+- [ ] **MSC4190** — Appservice device management for improved E2EE
+- [ ] **Remove GeWeChat dependency** — Complete migration off archived iPad provider
 
 ## Security
 

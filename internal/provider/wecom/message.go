@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
 )
@@ -112,17 +113,20 @@ func (p *Provider) sendMessage(ctx context.Context, req *sendMessageRequest) (st
 }
 
 // sendGroupMessage sends a message to a group chat via /cgi-bin/appchat/send.
-func (p *Provider) sendGroupMessage(ctx context.Context, req *appChatSendRequest) error {
+// WeCom's appchat/send API does not return a message ID, so we generate one for tracking.
+func (p *Provider) sendGroupMessage(ctx context.Context, req *appChatSendRequest) (string, error) {
 	var resp APIResponse
 	if err := p.client.PostJSON(ctx, "/cgi-bin/appchat/send", req, &resp); err != nil {
-		return err
+		return "", err
 	}
 
 	if resp.ErrCode != 0 {
-		return fmt.Errorf("send group message: [%d] %s", resp.ErrCode, resp.ErrMsg)
+		return "", fmt.Errorf("send group message: [%d] %s", resp.ErrCode, resp.ErrMsg)
 	}
 
-	return nil
+	// WeCom appchat/send does not return msgid; generate a synthetic one for tracking
+	msgID := makeMessageID(p.client.agentID, time.Now().UnixMilli())
+	return msgID, nil
 }
 
 // isGroupChat checks if a toUser ID looks like a WeCom group chat ID.
@@ -136,12 +140,11 @@ func isGroupChat(toUser string) bool {
 // SendText sends a text message.
 func (p *Provider) SendText(ctx context.Context, toUser string, text string) (string, error) {
 	if isGroupChat(toUser) {
-		err := p.sendGroupMessage(ctx, &appChatSendRequest{
+		return p.sendGroupMessage(ctx, &appChatSendRequest{
 			ChatID:  toUser,
 			MsgType: "text",
 			Text:    &textContent{Content: text},
 		})
-		return "", err
 	}
 
 	return p.sendMessage(ctx, &sendMessageRequest{
@@ -159,12 +162,11 @@ func (p *Provider) SendImage(ctx context.Context, toUser string, data io.Reader,
 	}
 
 	if isGroupChat(toUser) {
-		err := p.sendGroupMessage(ctx, &appChatSendRequest{
+		return p.sendGroupMessage(ctx, &appChatSendRequest{
 			ChatID:  toUser,
 			MsgType: "image",
 			Image:   &mediaContent{MediaID: mediaResp.MediaID},
 		})
-		return "", err
 	}
 
 	return p.sendMessage(ctx, &sendMessageRequest{
@@ -182,12 +184,11 @@ func (p *Provider) SendVideo(ctx context.Context, toUser string, data io.Reader,
 	}
 
 	if isGroupChat(toUser) {
-		err := p.sendGroupMessage(ctx, &appChatSendRequest{
+		return p.sendGroupMessage(ctx, &appChatSendRequest{
 			ChatID:  toUser,
 			MsgType: "video",
 			Video:   &videoContent{MediaID: mediaResp.MediaID},
 		})
-		return "", err
 	}
 
 	return p.sendMessage(ctx, &sendMessageRequest{
@@ -205,12 +206,11 @@ func (p *Provider) SendVoice(ctx context.Context, toUser string, data io.Reader,
 	}
 
 	if isGroupChat(toUser) {
-		err := p.sendGroupMessage(ctx, &appChatSendRequest{
+		return p.sendGroupMessage(ctx, &appChatSendRequest{
 			ChatID:  toUser,
 			MsgType: "voice",
 			Voice:   &mediaContent{MediaID: mediaResp.MediaID},
 		})
-		return "", err
 	}
 
 	return p.sendMessage(ctx, &sendMessageRequest{
@@ -228,12 +228,11 @@ func (p *Provider) SendFile(ctx context.Context, toUser string, data io.Reader, 
 	}
 
 	if isGroupChat(toUser) {
-		err := p.sendGroupMessage(ctx, &appChatSendRequest{
+		return p.sendGroupMessage(ctx, &appChatSendRequest{
 			ChatID:  toUser,
 			MsgType: "file",
 			File:    &mediaContent{MediaID: mediaResp.MediaID},
 		})
-		return "", err
 	}
 
 	return p.sendMessage(ctx, &sendMessageRequest{
@@ -254,7 +253,7 @@ func (p *Provider) SendLocation(ctx context.Context, toUser string, loc *wechat.
 // SendLink sends a textcard message (WeCom's equivalent of link cards).
 func (p *Provider) SendLink(ctx context.Context, toUser string, link *wechat.LinkCardInfo) (string, error) {
 	if isGroupChat(toUser) {
-		err := p.sendGroupMessage(ctx, &appChatSendRequest{
+		return p.sendGroupMessage(ctx, &appChatSendRequest{
 			ChatID:  toUser,
 			MsgType: "textcard",
 			TextCard: &textCardContent{
@@ -264,7 +263,6 @@ func (p *Provider) SendLink(ctx context.Context, toUser string, link *wechat.Lin
 				BtnTxt:      "View",
 			},
 		})
-		return "", err
 	}
 
 	return p.sendMessage(ctx, &sendMessageRequest{

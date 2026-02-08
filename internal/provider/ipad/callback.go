@@ -246,13 +246,24 @@ func (ch *CallbackHandler) handleLoginStatus(ctx context.Context, data map[strin
 }
 
 // parseMessage converts a callback payload to a wechat.Message.
+// Returns nil if required fields (msg_id, from_user) are missing or invalid.
 func (ch *CallbackHandler) parseMessage(data map[string]interface{}) *wechat.Message {
 	msg := &wechat.Message{
 		Extra: make(map[string]string),
 	}
 
-	msg.MsgID, _ = data["msg_id"].(string)
-	msg.FromUser, _ = data["from_user"].(string)
+	var ok bool
+	msg.MsgID, ok = data["msg_id"].(string)
+	if !ok || msg.MsgID == "" {
+		ch.log.Warn("callback message missing msg_id", "keys", mapKeys(data))
+		return nil
+	}
+	msg.FromUser, ok = data["from_user"].(string)
+	if !ok || msg.FromUser == "" {
+		ch.log.Warn("callback message missing from_user", "msg_id", msg.MsgID)
+		return nil
+	}
+
 	msg.ToUser, _ = data["to_user"].(string)
 	msg.Content, _ = data["content"].(string)
 	msg.MediaURL, _ = data["media_url"].(string)
