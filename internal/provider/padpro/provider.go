@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -60,6 +61,7 @@ type Provider struct {
 
 	// Webhook callback server
 	callbackServer *http.Server
+	callbackLn     net.Listener
 }
 
 // --- Lifecycle ---
@@ -129,6 +131,17 @@ func (p *Provider) Start(ctx context.Context) error {
 	if p.handler == nil {
 		p.log.Warn("message handler not configured, inbound sync disabled")
 	} else {
+		// Bind local callback server before startup succeeds so port conflicts fail fast.
+		if portStr := p.cfg.Extra["callback_port"]; portStr != "" {
+			port, _ := strconv.Atoi(portStr)
+			if port > 0 {
+				if err := p.prepareCallbackServer(port); err != nil {
+					p.mu.Unlock()
+					return fmt.Errorf("start callback server: %w", err)
+				}
+			}
+		}
+
 		// Configure webhook callback if URL is specified
 		webhookURL := p.cfg.Extra["webhook_url"]
 		if webhookURL != "" {
@@ -139,20 +152,13 @@ func (p *Provider) Start(ctx context.Context) error {
 			}
 		}
 
-		// Start local callback server if port is specified
-		if portStr := p.cfg.Extra["callback_port"]; portStr != "" {
-			port, _ := strconv.Atoi(portStr)
-			if port > 0 {
-				p.startCallbackServer(port)
-			}
-		}
-
 		// Start WebSocket event listener for real-time message sync
 		stopCh := p.stopCh
 		go p.wsEventLoop(stopCh)
 	}
 
 	p.running = true
+	p.servePreparedCallbackServer()
 	p.log.Info("PadPro provider started")
 	p.mu.Unlock()
 	return nil
@@ -176,6 +182,8 @@ func (p *Provider) Stop() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		p.callbackServer.Shutdown(shutdownCtx)
+		p.callbackServer = nil
+		p.callbackLn = nil
 	}
 
 	p.running = false
@@ -885,8 +893,8 @@ func (p *Provider) wsEventLoop(stopCh chan struct{}) {
 	}
 }
 
-// startCallbackServer starts a local HTTP server for receiving webhook callbacks.
-func (p *Provider) startCallbackServer(port int) {
+// prepareCallbackServer binds the local HTTP server used for webhook callbacks.
+func (p *Provider) prepareCallbackServer(port int) error {
 	webhookHandler := NewWebhookHandler(
 		p.log.With("component", "webhook"),
 		p.handler,
@@ -903,12 +911,26 @@ func (p *Provider) startCallbackServer(port int) {
 		WriteTimeout: 30 * time.Second,
 	}
 
-	go func() {
-		p.log.Info("webhook callback server listening", "addr", addr)
-		if err := p.callbackServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		p.callbackServer = nil
+		return err
+	}
+	p.callbackLn = listener
+	return nil
+}
+
+func (p *Provider) servePreparedCallbackServer() {
+	if p.callbackServer == nil || p.callbackLn == nil {
+		return
+	}
+
+	go func(server *http.Server, listener net.Listener) {
+		p.log.Info("webhook callback server listening", "addr", listener.Addr().String())
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			p.log.Error("webhook server error", "error", err)
 		}
-	}()
+	}(p.callbackServer, p.callbackLn)
 }
 
 // formatMsgID converts a sendMsgResponse to a string message ID.

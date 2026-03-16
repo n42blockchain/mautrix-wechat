@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -34,6 +35,7 @@ type Provider struct {
 	running     bool
 	stopCh      chan struct{}
 	callbackSrv *http.Server
+	callbackLn  net.Listener
 	log         *slog.Logger
 
 	// Sub-components
@@ -104,13 +106,17 @@ func (p *Provider) Start(ctx context.Context) error {
 
 	// Start callback HTTP server
 	if p.cfg.CallbackURL != "" && p.handler != nil {
-		go p.startCallbackServer()
+		if err := p.prepareCallbackServer(); err != nil {
+			p.mu.Unlock()
+			return fmt.Errorf("start callback server: %w", err)
+		}
 	}
 
 	// Start reconnection monitor
 	p.reconnector.Start()
 
 	p.running = true
+	p.servePreparedCallbackServer()
 	p.log.Info("ipad provider started",
 		"api_endpoint", p.cfg.APIEndpoint,
 		"callback_url", p.cfg.CallbackURL)
@@ -137,6 +143,8 @@ func (p *Provider) Stop() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		p.callbackSrv.Shutdown(ctx)
+		p.callbackSrv = nil
+		p.callbackLn = nil
 	}
 
 	p.running = false
@@ -826,8 +834,8 @@ func (p *Provider) pollLoginStatus(ctx context.Context, stopCh chan struct{}) {
 	}
 }
 
-// startCallbackServer starts an HTTP server to receive GeWeChat callbacks.
-func (p *Provider) startCallbackServer() {
+// prepareCallbackServer binds the HTTP server used to receive GeWeChat callbacks.
+func (p *Provider) prepareCallbackServer() error {
 	mux := http.NewServeMux()
 	mux.Handle("POST /callback", p.callbackHandler)
 
@@ -846,10 +854,26 @@ func (p *Provider) startCallbackServer() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	p.log.Info("callback server listening", "port", port)
-	if err := p.callbackSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		p.log.Error("callback server error", "error", err)
+	listener, err := net.Listen("tcp", p.callbackSrv.Addr)
+	if err != nil {
+		p.callbackSrv = nil
+		return err
 	}
+	p.callbackLn = listener
+	return nil
+}
+
+func (p *Provider) servePreparedCallbackServer() {
+	if p.callbackSrv == nil || p.callbackLn == nil {
+		return
+	}
+
+	go func(server *http.Server, listener net.Listener) {
+		p.log.Info("callback server listening", "addr", listener.Addr().String())
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			p.log.Error("callback server error", "error", err)
+		}
+	}(p.callbackSrv, p.callbackLn)
 }
 
 func (p *Provider) setLoginState(state wechat.LoginState) {

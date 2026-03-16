@@ -167,6 +167,8 @@
 - 2026-03-16 23: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the bridge startup and failover hardening pass.
 - 2026-03-16 23: Fixed `ipad.DownloadMedia()` to prefer embedded `MediaData` over potentially expired `MediaURL` values, so Matrix-side media forwarding still succeeds when callback payloads already contain bytes.
 - 2026-03-16 23: Added `ipad` regression coverage for the embedded-media-over-broken-URL path and re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully again.
+- 2026-03-16 23: Hardened `ipad` and `padpro` callback server startup to bind ports before `Start()` succeeds, so occupied webhook ports now fail fast instead of only logging from background goroutines.
+- 2026-03-16 23: Added provider regression tests covering occupied callback ports for both `ipad` and `padpro`, then re-ran `go test ./...` and `go vet ./...` successfully.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 54.3%

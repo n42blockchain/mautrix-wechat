@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -118,6 +119,40 @@ func TestProvider_StartWithoutHandlerSkipsCallbackServer(t *testing.T) {
 
 	if p.callbackSrv != nil {
 		t.Fatal("callback server should stay disabled when handler is nil")
+	}
+}
+
+func TestProvider_StartFailsWhenCallbackPortIsOccupied(t *testing.T) {
+	occupied, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer occupied.Close()
+
+	_, port, err := net.SplitHostPort(occupied.Addr().String())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: "http://127.0.0.1:1",
+		CallbackURL: "http://127.0.0.1/callback",
+		Extra: map[string]string{
+			"callback_port": port,
+		},
+	}, newLoginCaptureHandler()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if err := p.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "start callback server") {
+		t.Fatalf("start error = %v", err)
+	}
+	if p.IsRunning() {
+		t.Fatal("provider should not be marked running after callback bind failure")
+	}
+	if p.callbackSrv != nil || p.callbackLn != nil {
+		t.Fatal("callback server resources should not be retained on bind failure")
 	}
 }
 
