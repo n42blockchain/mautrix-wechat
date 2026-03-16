@@ -580,6 +580,10 @@ func (p *Provider) LeaveGroup(ctx context.Context, groupID string) error {
 // --- Media ---
 
 func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.ReadCloser, string, error) {
+	if len(msg.MediaData) > 0 {
+		return io.NopCloser(bytes.NewReader(msg.MediaData)), "application/octet-stream", nil
+	}
+
 	if msg.MediaURL != "" {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, msg.MediaURL, nil)
 		if err != nil {
@@ -598,10 +602,6 @@ func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.R
 			mimeType = "application/octet-stream"
 		}
 		return resp.Body, mimeType, nil
-	}
-
-	if len(msg.MediaData) > 0 {
-		return io.NopCloser(bytes.NewReader(msg.MediaData)), "application/octet-stream", nil
 	}
 
 	return nil, "", fmt.Errorf("no media available")

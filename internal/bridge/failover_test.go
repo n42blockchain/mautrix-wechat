@@ -457,6 +457,89 @@ func TestProviderManager_StopClearsActiveState(t *testing.T) {
 	}
 }
 
+func TestProviderManager_MetricsUseLoginStateNotTier(t *testing.T) {
+	log := slog.Default()
+	metrics := NewMetrics()
+	pm := NewProviderManager(log, DefaultFailoverConfig(), metrics)
+
+	pm.AddProvider(newMockProvider("wecom", 1), &wechat.ProviderConfig{})
+	if err := pm.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer pm.Stop()
+
+	if metrics.connectedState.Load() != 1 {
+		t.Fatalf("connected state = %d", metrics.connectedState.Load())
+	}
+	if metrics.loginState.Load() != int64(wechat.LoginStateLoggedIn) {
+		t.Fatalf("login state metric = %d", metrics.loginState.Load())
+	}
+}
+
+func TestProviderManager_ForceProviderUpdatesMetricsAndCallback(t *testing.T) {
+	log := slog.Default()
+	metrics := NewMetrics()
+	pm := NewProviderManager(log, DefaultFailoverConfig(), metrics)
+
+	p1 := newMockProvider("wecom", 1)
+	p2 := newMockProvider("ipad", 2)
+	p2.loginState = wechat.LoginStateError
+
+	var switched wechat.Provider
+	pm.SetOnSwitch(func(newProvider wechat.Provider) {
+		switched = newProvider
+	})
+
+	pm.AddProvider(p1, &wechat.ProviderConfig{})
+	pm.AddProvider(p2, &wechat.ProviderConfig{})
+
+	if err := pm.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer pm.Stop()
+
+	if err := pm.ForceProvider("ipad"); err != nil {
+		t.Fatalf("ForceProvider: %v", err)
+	}
+
+	if switched == nil || switched.Name() != "ipad" {
+		t.Fatalf("switch callback provider = %+v", switched)
+	}
+	if metrics.connectedState.Load() != 0 {
+		t.Fatalf("connected state = %d", metrics.connectedState.Load())
+	}
+	if metrics.loginState.Load() != int64(wechat.LoginStateError) {
+		t.Fatalf("login state metric = %d", metrics.loginState.Load())
+	}
+}
+
+func TestProviderManager_HealthCheckUpdatesMetricsForUnhealthyProvider(t *testing.T) {
+	log := slog.Default()
+	metrics := NewMetrics()
+	pm := NewProviderManager(log, DefaultFailoverConfig(), metrics)
+
+	p1 := newMockProvider("wecom", 1)
+	pm.AddProvider(p1, &wechat.ProviderConfig{})
+
+	if err := pm.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer pm.Stop()
+
+	p1.mu.Lock()
+	p1.loginState = wechat.LoginStateError
+	p1.mu.Unlock()
+
+	pm.checkActiveProvider()
+
+	if metrics.connectedState.Load() != 0 {
+		t.Fatalf("connected state = %d", metrics.connectedState.Load())
+	}
+	if metrics.loginState.Load() != int64(wechat.LoginStateError) {
+		t.Fatalf("login state metric = %d", metrics.loginState.Load())
+	}
+}
+
 func TestProviderManager_EmptyProviders(t *testing.T) {
 	log := slog.Default()
 	pm := NewProviderManager(log, DefaultFailoverConfig(), nil)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,10 +36,12 @@ type Bridge struct {
 	SessionManager *SessionManager
 	NodePool       *NodePool
 
-	httpServer    *http.Server
-	metricsServer *http.Server
-	mu            sync.Mutex
-	running       bool
+	httpServer      *http.Server
+	httpListener    net.Listener
+	metricsServer   *http.Server
+	metricsListener net.Listener
+	mu              sync.Mutex
+	running         bool
 }
 
 // New creates a new Bridge instance from the given configuration.
@@ -59,13 +62,19 @@ func New(cfg *config.Config, log *slog.Logger) (*Bridge, error) {
 }
 
 // Start initializes all components and starts the bridge.
-func (b *Bridge) Start(ctx context.Context) error {
+func (b *Bridge) Start(ctx context.Context) (err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.running {
 		return fmt.Errorf("bridge is already running")
 	}
+
+	defer func() {
+		if err != nil {
+			b.cleanupStartupLocked()
+		}
+	}()
 
 	b.Log.Info("starting mautrix-wechat bridge")
 
@@ -220,16 +229,15 @@ func (b *Bridge) Start(ctx context.Context) error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	go func() {
-		b.Log.Info("AS HTTP server listening", "addr", listenAddr)
-		if err := b.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			b.Log.Error("HTTP server error", "error", err)
-		}
-	}()
+	if err := b.prepareHTTPServer(); err != nil {
+		return fmt.Errorf("bind AS HTTP server: %w", err)
+	}
 
 	// Start metrics HTTP server (if enabled)
 	if b.Config.Metrics.Enabled {
-		b.startMetricsServer()
+		if err := b.prepareMetricsServer(); err != nil {
+			return fmt.Errorf("bind metrics server: %w", err)
+		}
 	}
 
 	// Start provider(s) — only in non-multi-tenant mode
@@ -247,11 +255,14 @@ func (b *Bridge) Start(ctx context.Context) error {
 			if err := b.Provider.Start(ctx); err != nil {
 				return fmt.Errorf("start provider %s: %w", b.Provider.Name(), err)
 			}
+			b.Metrics.SetConnected(b.Provider.IsRunning() && b.Provider.GetLoginState() == wechat.LoginStateLoggedIn)
+			b.Metrics.SetLoginState(int(b.Provider.GetLoginState()))
 			b.Log.Info("provider started", "name", b.Provider.Name(), "tier", b.Provider.Tier())
 		}
 	}
 
 	b.running = true
+	b.servePreparedServers()
 	b.Log.Info("mautrix-wechat bridge started successfully")
 
 	return nil
@@ -276,6 +287,8 @@ func (b *Bridge) Stop() error {
 		if err := b.metricsServer.Shutdown(shutdownCtx); err != nil {
 			b.Log.Error("metrics server shutdown error", "error", err)
 		}
+		b.metricsServer = nil
+		b.metricsListener = nil
 	}
 
 	// Stop HTTP server
@@ -283,6 +296,8 @@ func (b *Bridge) Stop() error {
 		if err := b.httpServer.Shutdown(shutdownCtx); err != nil {
 			b.Log.Error("HTTP server shutdown error", "error", err)
 		}
+		b.httpServer = nil
+		b.httpListener = nil
 	}
 
 	// Stop multi-tenant components
@@ -402,8 +417,17 @@ func (b *Bridge) buildProviderConfig() *wechat.ProviderConfig {
 	}
 }
 
-// startMetricsServer starts a dedicated HTTP server for Prometheus metrics and health checks.
-func (b *Bridge) startMetricsServer() {
+func (b *Bridge) prepareHTTPServer() error {
+	listener, err := net.Listen("tcp", b.httpServer.Addr)
+	if err != nil {
+		return err
+	}
+	b.httpListener = listener
+	return nil
+}
+
+// prepareMetricsServer binds the dedicated Prometheus/health HTTP server.
+func (b *Bridge) prepareMetricsServer() error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", b.Metrics.Handler())
 	mux.HandleFunc("/health", b.handleHealth)
@@ -415,18 +439,87 @@ func (b *Bridge) startMetricsServer() {
 		WriteTimeout: 10 * time.Second,
 	}
 
+	listener, err := net.Listen("tcp", b.Config.Metrics.Listen)
+	if err != nil {
+		return err
+	}
+	b.metricsListener = listener
+
+	return nil
+}
+
+func (b *Bridge) servePreparedServers() {
+	if b.httpServer != nil && b.httpListener != nil {
+		b.serveServer("AS HTTP server", b.httpServer, b.httpListener)
+	}
+	if b.metricsServer != nil && b.metricsListener != nil {
+		b.serveServer("metrics server", b.metricsServer, b.metricsListener)
+	}
+}
+
+func (b *Bridge) serveServer(name string, server *http.Server, listener net.Listener) {
 	go func() {
-		b.Log.Info("metrics server listening", "addr", b.Config.Metrics.Listen)
-		if err := b.metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			b.Log.Error("metrics server error", "error", err)
+		b.Log.Info(name+" listening", "addr", listener.Addr().String())
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			b.Log.Error(name+" error", "error", err)
 		}
 	}()
+}
+
+func (b *Bridge) cleanupStartupLocked() {
+	if b.metricsListener != nil {
+		if err := b.metricsListener.Close(); err != nil {
+			b.Log.Error("metrics listener cleanup error", "error", err)
+		}
+		b.metricsListener = nil
+	}
+	b.metricsServer = nil
+
+	if b.httpListener != nil {
+		if err := b.httpListener.Close(); err != nil {
+			b.Log.Error("HTTP listener cleanup error", "error", err)
+		}
+		b.httpListener = nil
+	}
+	b.httpServer = nil
+
+	if b.SessionManager != nil {
+		b.SessionManager.StopAll()
+	}
+	if b.NodePool != nil {
+		b.NodePool.Stop()
+	}
+
+	if b.ProviderManager != nil {
+		if stopErr := b.ProviderManager.Stop(); stopErr != nil {
+			b.Log.Error("provider manager cleanup error", "error", stopErr)
+		}
+	} else if b.Provider != nil && b.Provider.IsRunning() {
+		if stopErr := b.Provider.Stop(); stopErr != nil {
+			b.Log.Error("provider cleanup error", "error", stopErr)
+		}
+	}
+
+	if b.Crypto != nil {
+		if closeErr := b.Crypto.Close(); closeErr != nil {
+			b.Log.Error("crypto cleanup error", "error", closeErr)
+		}
+	}
+
+	if b.Metrics != nil {
+		b.Metrics.SetConnected(false)
+		b.Metrics.SetLoginState(int(wechat.LoginStateLoggedOut))
+	}
+
+	b.running = false
 }
 
 // handleHealth serves a comprehensive JSON health check response.
 func (b *Bridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := b.Metrics.HealthStatus()
 	if b.Provider != nil {
+		status["connected"] = b.Provider.IsRunning() && b.Provider.GetLoginState() == wechat.LoginStateLoggedIn
+		status["login_state"] = int64(b.Provider.GetLoginState())
 		status["provider"] = b.Provider.Name()
 		status["provider_running"] = b.Provider.IsRunning()
 	} else {

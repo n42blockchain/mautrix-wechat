@@ -170,10 +170,6 @@ func (pm *ProviderManager) Start(ctx context.Context) error {
 
 	pm.running = true
 
-	if pm.metrics != nil {
-		pm.metrics.SetConnected(true)
-	}
-
 	// Start health check loop if failover is enabled
 	if pm.cfg.Enabled {
 		go pm.healthCheckLoop()
@@ -292,7 +288,7 @@ func (pm *ProviderManager) activateBestProvider(ctx context.Context) error {
 			"tier", ps.Provider.Tier())
 
 		if pm.metrics != nil {
-			pm.metrics.SetLoginState(ps.Provider.Tier())
+			pm.updateMetricsForProvider(ps)
 		}
 
 		return nil
@@ -338,6 +334,9 @@ func (pm *ProviderManager) checkActiveProvider() {
 	ps.TotalChecks++
 
 	healthy := pm.isProviderHealthy(ps)
+	if pm.metrics != nil {
+		pm.updateMetricsForProvider(ps)
+	}
 
 	if healthy {
 		ps.ConsecutiveFails = 0
@@ -425,8 +424,7 @@ func (pm *ProviderManager) performFailover(failedPS *ProviderState) {
 		if pm.metrics != nil {
 			pm.metrics.IncrReconnectAttempts()
 			pm.metrics.IncrReconnectSuccesses()
-			pm.metrics.SetConnected(true)
-			pm.metrics.SetLoginState(ps.Provider.Tier())
+			pm.updateMetricsForProvider(ps)
 		}
 
 		if pm.onSwitch != nil {
@@ -440,7 +438,7 @@ func (pm *ProviderManager) performFailover(failedPS *ProviderState) {
 	pm.activeIdx = -1
 
 	if pm.metrics != nil {
-		pm.metrics.SetConnected(false)
+		pm.updateMetricsForProvider(nil)
 	}
 }
 
@@ -528,8 +526,7 @@ func (pm *ProviderManager) performPromotion(toIdx int) {
 
 	if pm.metrics != nil {
 		pm.metrics.IncrReconnectSuccesses()
-		pm.metrics.SetConnected(true)
-		pm.metrics.SetLoginState(newPS.Provider.Tier())
+		pm.updateMetricsForProvider(newPS)
 	}
 
 	if pm.onSwitch != nil {
@@ -581,9 +578,32 @@ func (pm *ProviderManager) ForceProvider(name string) error {
 		ps.ConsecutiveFails = 0
 		pm.activeIdx = i
 
+		if pm.metrics != nil {
+			pm.updateMetricsForProvider(ps)
+		}
+
+		if pm.onSwitch != nil {
+			pm.onSwitch(ps.Provider)
+		}
+
 		pm.log.Info("manually switched provider", "name", name, "tier", ps.Provider.Tier())
 		return nil
 	}
 
 	return fmt.Errorf("provider %q not found", name)
+}
+
+func (pm *ProviderManager) updateMetricsForProvider(ps *ProviderState) {
+	if pm.metrics == nil {
+		return
+	}
+	if ps == nil {
+		pm.metrics.SetConnected(false)
+		pm.metrics.SetLoginState(int(wechat.LoginStateLoggedOut))
+		return
+	}
+
+	loginState := ps.Provider.GetLoginState()
+	pm.metrics.SetLoginState(int(loginState))
+	pm.metrics.SetConnected(ps.Provider.IsRunning() && loginState == wechat.LoginStateLoggedIn)
 }

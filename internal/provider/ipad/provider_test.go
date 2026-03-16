@@ -397,6 +397,39 @@ func TestProvider_DownloadMedia_UsesEmbeddedBytes(t *testing.T) {
 	}
 }
 
+func TestProvider_DownloadMedia_PrefersEmbeddedBytesOverBrokenURL(t *testing.T) {
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: "http://127.0.0.1:1",
+		Extra:       map[string]string{},
+	}, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	p.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			t.Fatalf("unexpected HTTP request to %s", req.URL.String())
+			return nil, nil
+		}),
+	}
+
+	reader, mimeType, err := p.DownloadMedia(context.Background(), &wechat.Message{
+		MediaURL:  "http://media.local/expired",
+		MediaData: []byte("embedded"),
+	})
+	if err != nil {
+		t.Fatalf("DownloadMedia error: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read embedded media: %v", err)
+	}
+	_ = reader.Close()
+
+	if string(data) != "embedded" || mimeType != "application/octet-stream" {
+		t.Fatalf("unexpected embedded media: %q %s", string(data), mimeType)
+	}
+}
+
 func TestProvider_GetUserAvatar_RejectsHTTPError(t *testing.T) {
 	var serverURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

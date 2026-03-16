@@ -160,13 +160,20 @@
 - 2026-03-16 23: Fixed `padpro.Login()` to emit `LoginStateError` events when QR-code fetch fails, so host UIs receive the same failure signal they already get from other providers.
 - 2026-03-16 23: Added `padpro` login and risk-control tests covering QR-code decode, logged-in state propagation, silence-period blocking, daily counter resets, and stats reporting, raising `internal/provider/padpro` coverage to `58.5%`.
 - 2026-03-16 22: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the provider/media hardening pass.
+- 2026-03-16 23: Fixed failover metrics to report actual provider login state rather than provider tier, updated manual `ForceProvider()` switching to fire the `onSwitch` callback, and taught `/health` to trust live provider state instead of potentially stale metrics.
+- 2026-03-16 23: Hardened bridge startup so AS and metrics listeners are bound before `Start()` returns success; port conflicts now fail fast instead of only logging from background goroutines.
+- 2026-03-16 23: Added startup rollback for partially initialized bridge state, closing bound listeners and stopping provider/session/crypto resources when `Start()` fails after partial initialization.
+- 2026-03-16 23: Added bridge startup/health regression coverage for occupied ports, startup cleanup, and health status sourcing, raising `internal/bridge` coverage to `54.3%`.
+- 2026-03-16 23: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the bridge startup and failover hardening pass.
+- 2026-03-16 23: Fixed `ipad.DownloadMedia()` to prefer embedded `MediaData` over potentially expired `MediaURL` values, so Matrix-side media forwarding still succeeds when callback payloads already contain bytes.
+- 2026-03-16 23: Added `ipad` regression coverage for the embedded-media-over-broken-URL path and re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully again.
 
 ## Final Coverage Snapshot
-- `internal/bridge` 53.2%
+- `internal/bridge` 54.3%
 - `internal/config` 98.4%
 - `internal/database` 67.9%
 - `internal/message` 91.2%
-- `internal/provider/ipad` 74.0%
+- `internal/provider/ipad` 73.9%
 - `internal/provider/padpro` 58.5%
 - `internal/provider/pchook` 81.4%
 - `internal/provider/wecom` 72.5%
