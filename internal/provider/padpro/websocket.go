@@ -25,6 +25,9 @@ type wsClient struct {
 }
 
 func newWSClient(endpoint, authKey string, handler wechat.MessageHandler, log *slog.Logger) *wsClient {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &wsClient{
 		endpoint: endpoint,
 		authKey:  authKey,
@@ -36,8 +39,8 @@ func newWSClient(endpoint, authKey string, handler wechat.MessageHandler, log *s
 // connect establishes the WebSocket connection and enters the read loop.
 // It blocks until the connection is lost or stopCh is closed.
 func (ws *wsClient) connect(stopCh chan struct{}) error {
-	wsURL := fmt.Sprintf("%s/ws/GetSyncMsg?key=%s", ws.endpoint, ws.authKey)
-	ws.log.Info("connecting to WebSocket", "url", wsURL)
+	wsURL := ws.websocketURL()
+	ws.log.Info("connecting to WebSocket", "endpoint", ws.endpoint)
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -82,6 +85,11 @@ func (ws *wsClient) readLoop(stopCh chan struct{}) error {
 
 // dispatchMessage routes a parsed WebSocket message to the appropriate handler.
 func (ws *wsClient) dispatchMessage(raw wsMessage) {
+	if ws.handler == nil {
+		ws.log.Warn("websocket handler not configured, dropping message")
+		return
+	}
+
 	ctx := context.Background()
 
 	msgType := wechat.MsgType(raw.MsgType)
@@ -103,6 +111,11 @@ func (ws *wsClient) dispatchMessage(raw wsMessage) {
 }
 
 func (ws *wsClient) handleRevoke(ctx context.Context, raw wsMessage) {
+	if ws.handler == nil {
+		ws.log.Warn("websocket handler not configured, dropping revoke")
+		return
+	}
+
 	msg := convertWSMessage(raw)
 	if msg == nil {
 		return
@@ -118,4 +131,8 @@ func (ws *wsClient) close() error {
 		return ws.conn.Close()
 	}
 	return nil
+}
+
+func (ws *wsClient) websocketURL() string {
+	return fmt.Sprintf("%s/ws/GetSyncMsg?key=%s", ws.endpoint, ws.authKey)
 }

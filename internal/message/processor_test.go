@@ -1,7 +1,9 @@
 package message
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -24,12 +26,15 @@ type mockUpload struct {
 	fileName string
 }
 
-func (m *mockMatrixClient) EnsureRegistered(_ context.Context, _ string) error { return nil }
+func (m *mockMatrixClient) EnsureRegistered(_ context.Context, _ string) error  { return nil }
 func (m *mockMatrixClient) SetDisplayName(_ context.Context, _, _ string) error { return nil }
 func (m *mockMatrixClient) SetAvatarURL(_ context.Context, _, _ string) error   { return nil }
 func (m *mockMatrixClient) UploadMedia(_ context.Context, data []byte, mimeType, fileName string) (string, error) {
 	m.uploaded = append(m.uploaded, mockUpload{data, mimeType, fileName})
 	return "mxc://test/uploaded", nil
+}
+func (m *mockMatrixClient) DownloadMedia(_ context.Context, _ string) (io.ReadCloser, string, error) {
+	return io.NopCloser(bytes.NewReader([]byte("media"))), "application/octet-stream", nil
 }
 func (m *mockMatrixClient) SendMessage(_ context.Context, _, _ string, _ interface{}) (string, error) {
 	return "$event:test", nil
@@ -40,11 +45,11 @@ func (m *mockMatrixClient) SendMessageWithTimestamp(_ context.Context, _, _ stri
 func (m *mockMatrixClient) CreateRoom(_ context.Context, _ *bridge.CreateRoomRequest) (string, error) {
 	return "!room:test", nil
 }
-func (m *mockMatrixClient) JoinRoom(_ context.Context, _, _ string) error             { return nil }
-func (m *mockMatrixClient) LeaveRoom(_ context.Context, _, _ string) error            { return nil }
-func (m *mockMatrixClient) InviteToRoom(_ context.Context, _, _ string) error         { return nil }
-func (m *mockMatrixClient) KickFromRoom(_ context.Context, _, _, _ string) error      { return nil }
-func (m *mockMatrixClient) RedactEvent(_ context.Context, _, _, _ string) error       { return nil }
+func (m *mockMatrixClient) JoinRoom(_ context.Context, _, _ string) error        { return nil }
+func (m *mockMatrixClient) LeaveRoom(_ context.Context, _, _ string) error       { return nil }
+func (m *mockMatrixClient) InviteToRoom(_ context.Context, _, _ string) error    { return nil }
+func (m *mockMatrixClient) KickFromRoom(_ context.Context, _, _, _ string) error { return nil }
+func (m *mockMatrixClient) RedactEvent(_ context.Context, _, _, _ string) error  { return nil }
 func (m *mockMatrixClient) SendStateEvent(_ context.Context, _, _, _ string, _ interface{}) error {
 	return nil
 }
@@ -54,8 +59,8 @@ func (m *mockMatrixClient) SetRoomTopic(_ context.Context, _, _ string) error  {
 func (m *mockMatrixClient) SetTyping(_ context.Context, _, _ string, _ bool, _ int) error {
 	return nil
 }
-func (m *mockMatrixClient) SetPresence(_ context.Context, _ string, _ bool) error        { return nil }
-func (m *mockMatrixClient) SendReadReceipt(_ context.Context, _, _, _ string) error      { return nil }
+func (m *mockMatrixClient) SetPresence(_ context.Context, _ string, _ bool) error   { return nil }
+func (m *mockMatrixClient) SendReadReceipt(_ context.Context, _, _, _ string) error { return nil }
 func (m *mockMatrixClient) CreateSpace(_ context.Context, _ *bridge.CreateSpaceRequest) (string, error) {
 	return "!space:test", nil
 }
@@ -381,6 +386,19 @@ func TestProcessor_UnsupportedType(t *testing.T) {
 	}
 	if content != nil {
 		t.Fatal("unsupported type should return nil")
+	}
+}
+
+func TestProcessor_ImageMessage_NoMatrixClient(t *testing.T) {
+	p := NewProcessor(testLog, nil)
+
+	_, err := p.WeChatToMatrix(context.Background(), &wechat.Message{
+		MsgID:     "msg014",
+		Type:      wechat.MsgImage,
+		MediaData: []byte("fake image data"),
+	})
+	if err == nil {
+		t.Fatal("expected error when matrix client is missing")
 	}
 }
 

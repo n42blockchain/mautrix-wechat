@@ -110,6 +110,27 @@ func TestReconnector_Stop(t *testing.T) {
 	}
 }
 
+func TestReconnector_RestartRecreatesStopChannel(t *testing.T) {
+	r := NewReconnector(ReconnectorConfig{
+		Log:               testReconnectLog,
+		HeartbeatInterval: 100 * time.Millisecond,
+	})
+
+	r.Start()
+	r.Stop()
+	oldStopCh := r.stopCh
+
+	r.Start()
+	defer r.Stop()
+
+	if r.stopCh == oldStopCh {
+		t.Fatal("stop channel should be recreated on restart")
+	}
+	if r.state != stateDisconnected {
+		t.Fatalf("state: %v", r.state)
+	}
+}
+
 func TestReconnector_Stats(t *testing.T) {
 	r := NewReconnector(ReconnectorConfig{
 		Log: testReconnectLog,
@@ -223,7 +244,7 @@ func TestReconnector_ReconnectWithRetry(t *testing.T) {
 	r.MarkConnected()
 	// Manually trigger disconnection and reconnect instead of relying on heartbeat
 	r.MarkDisconnected()
-	go r.reconnectWithBackoff()
+	go r.reconnectWithBackoff(r.stopCh)
 
 	// Wait for retries
 	time.Sleep(500 * time.Millisecond)

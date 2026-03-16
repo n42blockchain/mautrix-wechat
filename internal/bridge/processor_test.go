@@ -229,6 +229,50 @@ func TestDefaultProcessor_MatrixImageToWeChat(t *testing.T) {
 	}
 }
 
+func TestDefaultProcessor_MatrixVideoToWeChat(t *testing.T) {
+	p := &defaultMessageProcessor{}
+	evt := &MatrixEvent{
+		Content: map[string]interface{}{
+			"msgtype": "m.video",
+			"body":    "clip.mp4",
+			"url":     "mxc://example.com/video123",
+		},
+	}
+
+	action, err := p.MatrixToWeChat(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if action.Type != wechat.MsgVideo {
+		t.Errorf("type: %d", action.Type)
+	}
+	if action.File != "mxc://example.com/video123" {
+		t.Errorf("file: %s", action.File)
+	}
+}
+
+func TestDefaultProcessor_MatrixAudioToWeChat(t *testing.T) {
+	p := &defaultMessageProcessor{}
+	evt := &MatrixEvent{
+		Content: map[string]interface{}{
+			"msgtype": "m.audio",
+			"body":    "voice.ogg",
+			"url":     "mxc://example.com/audio123",
+		},
+	}
+
+	action, err := p.MatrixToWeChat(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if action.Type != wechat.MsgVoice {
+		t.Errorf("type: %d", action.Type)
+	}
+	if action.File != "mxc://example.com/audio123" {
+		t.Errorf("file: %s", action.File)
+	}
+}
+
 func TestDefaultProcessor_MatrixUnknownReturnsNil(t *testing.T) {
 	p := &defaultMessageProcessor{}
 	evt := &MatrixEvent{

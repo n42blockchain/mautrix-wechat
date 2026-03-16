@@ -19,9 +19,9 @@ import (
 
 // Bridge is the main entry point that ties all components together.
 type Bridge struct {
-	Config   *config.Config
-	DB       *database.Database
-	Log      *slog.Logger
+	Config *config.Config
+	DB     *database.Database
+	Log    *slog.Logger
 
 	Puppets         *PuppetManager
 	EventRouter     *EventRouter
@@ -30,6 +30,10 @@ type Bridge struct {
 	ProviderManager *ProviderManager
 	Metrics         *Metrics
 	Crypto          CryptoHelper
+
+	// Multi-tenant fields
+	SessionManager *SessionManager
+	NodePool       *NodePool
 
 	httpServer    *http.Server
 	metricsServer *http.Server
@@ -74,17 +78,22 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 	b.Log.Info("database migrations complete")
 
-	// Select and initialize provider(s)
-	if b.Config.Providers.Failover.Enabled {
-		if err := b.initProviderManager(ctx); err != nil {
-			return fmt.Errorf("init provider manager: %w", err)
+	// Check if we're in multi-tenant mode
+	multiTenant := b.Config.Providers.PadPro.Enabled && b.Config.Providers.PadPro.MultiTenant
+
+	// Select and initialize provider(s) — skip in multi-tenant mode
+	if !multiTenant {
+		if b.Config.Providers.Failover.Enabled {
+			if err := b.initProviderManager(ctx); err != nil {
+				return fmt.Errorf("init provider manager: %w", err)
+			}
+		} else {
+			provider, err := b.selectProvider()
+			if err != nil {
+				return fmt.Errorf("select provider: %w", err)
+			}
+			b.Provider = provider
 		}
-	} else {
-		provider, err := b.selectProvider()
-		if err != nil {
-			return fmt.Errorf("select provider: %w", err)
-		}
-		b.Provider = provider
 	}
 
 	// Initialize puppet manager (MatrixClient will be set once we have a real implementation)
@@ -114,7 +123,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 		Log:          b.Log.With("component", "event_router"),
 		Puppets:      b.Puppets,
 		Processor:    &defaultMessageProcessor{},
-		Provider:     b.Provider,
+		Provider:     b.Provider, // nil in multi-tenant mode (per-user providers via SessionManager)
 		Rooms:        b.DB.RoomMapping,
 		Messages:     b.DB.MessageMapping,
 		BridgeUsers:  b.DB.BridgeUser,
@@ -122,21 +131,75 @@ func (b *Bridge) Start(ctx context.Context) error {
 		MatrixClient: nil, // Injected when real client available
 		Crypto:       b.Crypto,
 		Metrics:      b.Metrics,
+		MultiTenant:  multiTenant,
 	})
 
-	// Initialize provider with event router as message handler
-	if b.ProviderManager != nil {
-		b.ProviderManager.SetHandler(b.EventRouter)
-		b.ProviderManager.SetOnSwitch(func(newProvider wechat.Provider) {
-			b.Provider = newProvider
-			b.EventRouter.SetProvider(newProvider)
-			b.Log.Info("active provider switched",
-				"name", newProvider.Name(), "tier", newProvider.Tier())
-		})
+	if multiTenant {
+		// === Multi-tenant initialization ===
+
+		// 1. Create NodePool from configured nodes
+		b.NodePool = NewNodePool(
+			b.Config.Providers.PadPro.Nodes,
+			b.DB,
+			b.Log.With("component", "node_pool"),
+		)
+
+		// 2. Drop stale assignments that cannot be restored after a restart.
+		cleaned, err := b.DB.NodeAssignment.DeleteExceptLoginState(ctx, int(wechat.LoginStateLoggedIn))
+		if err != nil {
+			return fmt.Errorf("cleanup stale node assignments: %w", err)
+		}
+		if cleaned > 0 {
+			b.Log.Info("cleaned stale node assignments", "count", cleaned)
+		}
+
+		// 3. Restore user counts from DB
+		if err := b.NodePool.LoadAssignments(ctx); err != nil {
+			return fmt.Errorf("load node assignments: %w", err)
+		}
+
+		// 4. Start health check loop
+		go b.NodePool.HealthCheckLoop(ctx, 30*time.Second)
+
+		// 5. Create SessionManager (needs EventRouter; EventRouter needs SessionManager — resolve via setter)
+		b.SessionManager = NewSessionManager(
+			b.NodePool,
+			b.DB,
+			b.Config.Providers.PadPro.RiskControl,
+			b.EventRouter,
+			b.Config.Logging.MinLevel,
+			b.Log.With("component", "session_manager"),
+		)
+
+		// 6. Inject SessionManager back into EventRouter
+		b.EventRouter.SetSessionManager(b.SessionManager)
+
+		// 7. Restore previously logged-in sessions
+		if err := b.SessionManager.RestoreSessions(ctx); err != nil {
+			b.Log.Error("failed to restore sessions (non-fatal)", "error", err)
+		}
+
+		b.Log.Info("multi-tenant mode initialized",
+			"nodes", len(b.Config.Providers.PadPro.Nodes),
+			"restored_sessions", b.SessionManager.SessionCount())
+
 	} else {
-		providerCfg := b.buildProviderConfig()
-		if err := b.Provider.Init(providerCfg, b.EventRouter); err != nil {
-			return fmt.Errorf("initialize provider %s: %w", b.Provider.Name(), err)
+		// === Single-provider initialization (unchanged) ===
+
+		// Initialize provider with event router as message handler
+		if b.ProviderManager != nil {
+			b.ProviderManager.SetHandler(b.EventRouter)
+			b.ProviderManager.SetOnSwitch(func(newProvider wechat.Provider) {
+				b.Provider = newProvider
+				b.EventRouter.SetProvider(newProvider)
+				b.Log.Info("active provider switched",
+					"name", newProvider.Name(), "tier", newProvider.Tier())
+			})
+		} else {
+			providerCfg := b.buildProviderConfig()
+			if err := b.Provider.Init(providerCfg, b.EventRouter); err != nil {
+				return fmt.Errorf("initialize provider %s: %w", b.Provider.Name(), err)
+			}
 		}
 	}
 
@@ -169,21 +232,23 @@ func (b *Bridge) Start(ctx context.Context) error {
 		b.startMetricsServer()
 	}
 
-	// Start provider(s)
-	if b.ProviderManager != nil {
-		if err := b.ProviderManager.Start(ctx); err != nil {
-			return fmt.Errorf("start provider manager: %w", err)
+	// Start provider(s) — only in non-multi-tenant mode
+	if !multiTenant {
+		if b.ProviderManager != nil {
+			if err := b.ProviderManager.Start(ctx); err != nil {
+				return fmt.Errorf("start provider manager: %w", err)
+			}
+			b.Provider = b.ProviderManager.Active()
+			b.Log.Info("provider manager started",
+				"active", b.ProviderManager.ActiveName(),
+				"tier", b.ProviderManager.ActiveTier(),
+				"providers", b.ProviderManager.ProviderCount())
+		} else {
+			if err := b.Provider.Start(ctx); err != nil {
+				return fmt.Errorf("start provider %s: %w", b.Provider.Name(), err)
+			}
+			b.Log.Info("provider started", "name", b.Provider.Name(), "tier", b.Provider.Tier())
 		}
-		b.Provider = b.ProviderManager.Active()
-		b.Log.Info("provider manager started",
-			"active", b.ProviderManager.ActiveName(),
-			"tier", b.ProviderManager.ActiveTier(),
-			"providers", b.ProviderManager.ProviderCount())
-	} else {
-		if err := b.Provider.Start(ctx); err != nil {
-			return fmt.Errorf("start provider %s: %w", b.Provider.Name(), err)
-		}
-		b.Log.Info("provider started", "name", b.Provider.Name(), "tier", b.Provider.Tier())
 	}
 
 	b.running = true
@@ -220,7 +285,15 @@ func (b *Bridge) Stop() error {
 		}
 	}
 
-	// Stop provider(s)
+	// Stop multi-tenant components
+	if b.SessionManager != nil {
+		b.SessionManager.StopAll()
+	}
+	if b.NodePool != nil {
+		b.NodePool.Stop()
+	}
+
+	// Stop provider(s) — single-provider mode
 	if b.ProviderManager != nil {
 		if err := b.ProviderManager.Stop(); err != nil {
 			b.Log.Error("provider manager stop error", "error", err)
@@ -361,6 +434,26 @@ func (b *Bridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 		status["provider_running"] = false
 	}
 
+	// Include multi-tenant node pool info if available
+	if b.NodePool != nil {
+		status["multi_tenant"] = true
+		nodeStates := b.NodePool.NodeStates()
+		nodeInfos := make([]map[string]interface{}, 0, len(nodeStates))
+		for id, ns := range nodeStates {
+			nodeInfos = append(nodeInfos, map[string]interface{}{
+				"id":           id,
+				"healthy":      ns.Healthy,
+				"active_users": ns.ActiveUsers,
+				"max_users":    ns.Config.MaxUsers,
+				"endpoint":     ns.Config.APIEndpoint,
+			})
+		}
+		status["nodes"] = nodeInfos
+		if b.SessionManager != nil {
+			status["active_sessions"] = b.SessionManager.SessionCount()
+		}
+	}
+
 	// Include failover info if available
 	if b.ProviderManager != nil {
 		status["failover_enabled"] = true
@@ -372,11 +465,11 @@ func (b *Bridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 		providerInfos := make([]map[string]interface{}, len(states))
 		for i, ps := range states {
 			providerInfos[i] = map[string]interface{}{
-				"name":    ps.Provider.Name(),
-				"tier":    ps.Provider.Tier(),
-				"active":  ps.Active,
-				"fails":   ps.ConsecutiveFails,
-				"checks":  ps.TotalChecks,
+				"name":   ps.Provider.Name(),
+				"tier":   ps.Provider.Tier(),
+				"active": ps.Active,
+				"fails":  ps.ConsecutiveFails,
+				"checks": ps.TotalChecks,
 			}
 		}
 		status["providers"] = providerInfos

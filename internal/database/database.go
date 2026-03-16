@@ -17,15 +17,16 @@ var migrationFS embed.FS
 type Database struct {
 	db *sql.DB
 
-	User           *UserStore
-	BridgeUser     *BridgeUserStore
-	RoomMapping    *RoomMappingStore
-	MessageMapping *MessageMappingStore
-	GroupMember    *GroupMemberStore
-	MediaCache     *MediaCacheStore
+	User            *UserStore
+	BridgeUser      *BridgeUserStore
+	RoomMapping     *RoomMappingStore
+	MessageMapping  *MessageMappingStore
+	GroupMember     *GroupMemberStore
+	MediaCache      *MediaCacheStore
 	ProviderSession *ProviderSessionStore
-	AuditLog       *AuditLogStore
-	RateLimit      *RateLimitStore
+	AuditLog        *AuditLogStore
+	RateLimit       *RateLimitStore
+	NodeAssignment  *NodeAssignmentStore
 }
 
 // New creates a new Database instance and runs migrations.
@@ -46,8 +47,8 @@ func New(driverName, dataSourceName string, maxOpen, maxIdle int) (*Database, er
 	}
 
 	d := &Database{db: db}
-	d.User = &UserStore{db: db}
-	d.BridgeUser = &BridgeUserStore{db: db}
+	d.User = NewUserStore(db)
+	d.BridgeUser = NewBridgeUserStore(db)
 	d.RoomMapping = &RoomMappingStore{db: db}
 	d.MessageMapping = &MessageMappingStore{db: db}
 	d.GroupMember = &GroupMemberStore{db: db}
@@ -55,6 +56,7 @@ func New(driverName, dataSourceName string, maxOpen, maxIdle int) (*Database, er
 	d.ProviderSession = &ProviderSessionStore{db: db}
 	d.AuditLog = &AuditLogStore{db: db}
 	d.RateLimit = &RateLimitStore{db: db}
+	d.NodeAssignment = NewNodeAssignmentStore(db)
 
 	return d, nil
 }

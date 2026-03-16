@@ -1,8 +1,12 @@
 package bridge
 
 import (
+	"context"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/n42/mautrix-wechat/internal/database"
 	"github.com/n42/mautrix-wechat/pkg/wechat"
 )
 
@@ -173,5 +177,36 @@ func TestPuppetManager_NewPuppetManager(t *testing.T) {
 	}
 	if pm.puppets == nil {
 		t.Error("puppets map should be initialized")
+	}
+}
+
+func TestPuppetManager_GetOrCreate_NoMatrixClient(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	store := database.NewUserStore(db)
+	pm := NewPuppetManager("example.com", "wechat_{{.}}", "{{.Nickname}} (WeChat)", store, nil)
+
+	mock.ExpectQuery(`(?s)SELECT .* FROM wechat_user WHERE wechat_id = \$1`).
+		WithArgs("wxid_test").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"wechat_id", "alias", "nickname", "avatar_url", "avatar_mxc", "gender",
+			"province", "city", "signature", "matrix_user_id", "name_set", "avatar_set",
+			"contact_info_set", "last_sync", "created_at", "updated_at",
+		}))
+
+	_, err = pm.GetOrCreate(context.Background(), &wechat.ContactInfo{
+		UserID:   "wxid_test",
+		Nickname: "Tester",
+	})
+	if err == nil {
+		t.Fatal("expected error when matrix client is missing")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }

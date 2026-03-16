@@ -94,14 +94,14 @@ func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandle
 
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.running {
+		p.mu.Unlock()
 		return nil
 	}
+	p.stopCh = make(chan struct{})
 
 	// Start callback HTTP server
-	if p.cfg.CallbackURL != "" {
+	if p.cfg.CallbackURL != "" && p.handler != nil {
 		go p.startCallbackServer()
 	}
 
@@ -112,6 +112,7 @@ func (p *Provider) Start(ctx context.Context) error {
 	p.log.Info("ipad provider started",
 		"api_endpoint", p.cfg.APIEndpoint,
 		"callback_url", p.cfg.CallbackURL)
+	p.mu.Unlock()
 
 	return nil
 }
@@ -185,21 +186,25 @@ func (p *Provider) Login(ctx context.Context) error {
 	resp, err := p.apiCall(ctx, "/login/qrcode", nil)
 	if err != nil {
 		p.setLoginState(wechat.LoginStateError)
-		p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-			State: wechat.LoginStateError,
-			Error: fmt.Sprintf("failed to get QR code: %v", err),
-		})
+		if p.handler != nil {
+			p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+				State: wechat.LoginStateError,
+				Error: fmt.Sprintf("failed to get QR code: %v", err),
+			})
+		}
 		return err
 	}
 
 	qrURL, _ := resp["qr_url"].(string)
 	qrBase64, _ := resp["qr_base64"].(string)
 
-	p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-		State:  wechat.LoginStateQRCode,
-		QRURL:  qrURL,
-		QRCode: []byte(qrBase64),
-	})
+	if p.handler != nil {
+		p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+			State:  wechat.LoginStateQRCode,
+			QRURL:  qrURL,
+			QRCode: []byte(qrBase64),
+		})
+	}
 
 	// Poll for login status
 	go p.pollLoginStatus(ctx)
@@ -281,7 +286,10 @@ func (p *Provider) SendVideo(ctx context.Context, toUser string, data io.Reader,
 		"filename": filename,
 	}
 	if thumb != nil {
-		thumbData, _ := io.ReadAll(thumb)
+		thumbData, err := io.ReadAll(thumb)
+		if err != nil {
+			return "", fmt.Errorf("read video thumbnail: %w", err)
+		}
 		payload["thumbnail"] = thumbData
 	}
 	resp, err := p.apiCall(ctx, "/message/send/video", payload)
@@ -567,7 +575,14 @@ func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.R
 		if err != nil {
 			return nil, "", fmt.Errorf("download media: %w", err)
 		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return nil, "", fmt.Errorf("download media HTTP %d", resp.StatusCode)
+		}
 		mimeType := resp.Header.Get("Content-Type")
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
 		return resp.Body, mimeType, nil
 	}
 
@@ -749,9 +764,11 @@ func (p *Provider) pollLoginStatus(ctx context.Context) {
 				// no change
 			case 1: // scanned
 				p.setLoginState(wechat.LoginStateConfirming)
-				p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-					State: wechat.LoginStateConfirming,
-				})
+				if p.handler != nil {
+					p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+						State: wechat.LoginStateConfirming,
+					})
+				}
 			case 2: // confirmed / logged in
 				userID, _ := resp["user_id"].(string)
 				name, _ := resp["nickname"].(string)
@@ -769,20 +786,24 @@ func (p *Provider) pollLoginStatus(ctx context.Context) {
 				// Mark reconnector as connected
 				p.reconnector.MarkConnected()
 
-				p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-					State:  wechat.LoginStateLoggedIn,
-					UserID: userID,
-					Name:   name,
-					Avatar: avatar,
-				})
+				if p.handler != nil {
+					p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+						State:  wechat.LoginStateLoggedIn,
+						UserID: userID,
+						Name:   name,
+						Avatar: avatar,
+					})
+				}
 				return
 			case -1: // error / expired
 				errMsg, _ := resp["error"].(string)
 				p.setLoginState(wechat.LoginStateError)
-				p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-					State: wechat.LoginStateError,
-					Error: errMsg,
-				})
+				if p.handler != nil {
+					p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+						State: wechat.LoginStateError,
+						Error: errMsg,
+					})
+				}
 				return
 			}
 		}

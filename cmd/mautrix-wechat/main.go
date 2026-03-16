@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/n42/mautrix-wechat/internal/bridge"
 	"github.com/n42/mautrix-wechat/internal/config"
@@ -33,12 +34,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Set up logging
-	logLevel := slog.LevelInfo
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
-	})
-	log := slog.New(handler)
+	log := newLogger(slog.LevelInfo)
+	slog.SetDefault(log)
 
 	log.Info("mautrix-wechat starting",
 		"version", version, "commit", commit, "build_date", buildDate)
@@ -49,6 +46,14 @@ func main() {
 		log.Error("failed to load config", "error", err, "path", *configPath)
 		os.Exit(1)
 	}
+
+	logLevel, err := parseLogLevel(cfg.Logging.MinLevel)
+	if err != nil {
+		log.Error("invalid logging.min_level", "error", err, "value", cfg.Logging.MinLevel)
+		os.Exit(1)
+	}
+	log = newLogger(logLevel)
+	slog.SetDefault(log)
 
 	if *genReg {
 		fmt.Print(cfg.GenerateRegistration())
@@ -65,6 +70,28 @@ func main() {
 	if err := b.Run(); err != nil {
 		log.Error("bridge error", "error", err)
 		os.Exit(1)
+	}
+}
+
+func newLogger(level slog.Level) *slog.Logger {
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	})
+	return slog.New(handler)
+}
+
+func parseLogLevel(value string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("unsupported log level %q", value)
 	}
 }
 
@@ -150,6 +177,25 @@ providers:
       max_friends_per_day: 20
       message_interval_ms: 1000
       random_delay: true
+
+    # Multi-tenant mode: each user logs in with their own WeChat account
+    # distributed across multiple PadPro server nodes.
+    # When enabled, api_endpoint and auth_key above are ignored;
+    # each node provides its own endpoint and auth_key.
+    multi_tenant: false
+    max_users_per_node: 10
+    # nodes:
+    #   - id: "node-01"
+    #     api_endpoint: "http://10.0.1.1:1239"
+    #     auth_key: "NODE_01_AUTH_KEY"
+    #     # ws_endpoint: ""
+    #     max_users: 10
+    #     enabled: true
+    #   - id: "node-02"
+    #     api_endpoint: "http://10.0.1.2:1239"
+    #     auth_key: "NODE_02_AUTH_KEY"
+    #     max_users: 10
+    #     enabled: true
 
   # DEPRECATED: GeWeChat was archived on 2025-05-03. Migrate to padpro.
   ipad:

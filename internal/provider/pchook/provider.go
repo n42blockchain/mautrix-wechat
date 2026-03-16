@@ -75,14 +75,15 @@ func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandle
 
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.running {
+		p.mu.Unlock()
 		return nil
 	}
+	p.stopCh = make(chan struct{})
 
 	// Connect to WeChatFerry RPC
 	if err := p.rpc.Connect(ctx); err != nil {
+		p.mu.Unlock()
 		return fmt.Errorf("connect to WeChatFerry: %w", err)
 	}
 
@@ -92,11 +93,19 @@ func (p *Provider) Start(ctx context.Context) error {
 	// Verify connection with a ping
 	if err := p.rpc.Ping(ctx); err != nil {
 		p.rpc.Close()
+		p.mu.Unlock()
 		return fmt.Errorf("ping WeChatFerry: %w", err)
 	}
+	p.mu.Unlock()
 
 	// Fetch login status
 	p.checkLoginStatus(ctx)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running {
+		return nil
+	}
 
 	// Start heartbeat goroutine
 	go p.heartbeatLoop()
@@ -167,10 +176,12 @@ func (p *Provider) Login(ctx context.Context) error {
 	p.checkLoginStatus(ctx)
 
 	if p.GetLoginState() != wechat.LoginStateLoggedIn {
-		p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
-			State: wechat.LoginStateError,
-			Error: "WeChat PC client is not logged in; please log in via the desktop client first",
-		})
+		if p.handler != nil {
+			p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+				State: wechat.LoginStateError,
+				Error: "WeChat PC client is not logged in; please log in via the desktop client first",
+			})
+		}
 		return fmt.Errorf("WeChat PC client is not logged in")
 	}
 

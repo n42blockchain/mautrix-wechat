@@ -34,6 +34,10 @@ func (wh *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if wh.handler == nil {
+		http.Error(w, "handler unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
 	var raw wsMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {

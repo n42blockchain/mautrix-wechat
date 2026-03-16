@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -44,6 +45,8 @@ type MatrixClient interface {
 	SetAvatarURL(ctx context.Context, userID, mxcURI string) error
 	// UploadMedia uploads media data and returns an MXC URI.
 	UploadMedia(ctx context.Context, data []byte, mimeType, fileName string) (string, error)
+	// DownloadMedia downloads Matrix media by MXC URI.
+	DownloadMedia(ctx context.Context, mxcURI string) (io.ReadCloser, string, error)
 	// SendMessage sends a Matrix event to a room on behalf of a user.
 	SendMessage(ctx context.Context, roomID, senderUserID string, content interface{}) (string, error)
 	// SendMessageWithTimestamp sends a Matrix event with a specified timestamp (for backfill).
@@ -151,6 +154,9 @@ func (pm *PuppetManager) GetOrCreate(ctx context.Context, contact *wechat.Contac
 	}
 
 	// Create new puppet
+	if pm.intent == nil {
+		return nil, fmt.Errorf("matrix client not initialized")
+	}
 	if err := pm.intent.EnsureRegistered(ctx, matrixUserID); err != nil {
 		return nil, fmt.Errorf("register puppet %s: %w", matrixUserID, err)
 	}
@@ -203,6 +209,9 @@ func (pm *PuppetManager) UpdateProfile(ctx context.Context, contact *wechat.Cont
 
 	// Update display name
 	if contact.Nickname != p.Nickname {
+		if pm.intent == nil {
+			return fmt.Errorf("matrix client not initialized")
+		}
 		displayName := pm.formatDisplayName(contact)
 		if err := pm.intent.SetDisplayName(ctx, p.MatrixUserID, displayName); err != nil {
 			return fmt.Errorf("update puppet display name: %w", err)
@@ -220,6 +229,9 @@ func (pm *PuppetManager) UpdateProfile(ctx context.Context, contact *wechat.Cont
 	}
 
 	if changed {
+		if pm.db == nil {
+			return fmt.Errorf("puppet database store not initialized")
+		}
 		dbUser := &database.WeChatUser{
 			WeChatID:     contact.UserID,
 			Alias:        contact.Alias,

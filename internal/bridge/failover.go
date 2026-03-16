@@ -42,27 +42,27 @@ func DefaultFailoverConfig() FailoverConfig {
 
 // ProviderState tracks the health of a single provider.
 type ProviderState struct {
-	Provider          wechat.Provider
-	Config            *wechat.ProviderConfig
-	ConsecutiveFails  int
-	ConsecutiveOK     int
-	LastCheckTime     time.Time
-	LastFailTime      time.Time
-	LastSuccessTime   time.Time
-	TotalChecks       int64
-	TotalFailures     int64
-	FailoverCount     int64
-	Active            bool
+	Provider         wechat.Provider
+	Config           *wechat.ProviderConfig
+	ConsecutiveFails int
+	ConsecutiveOK    int
+	LastCheckTime    time.Time
+	LastFailTime     time.Time
+	LastSuccessTime  time.Time
+	TotalChecks      int64
+	TotalFailures    int64
+	FailoverCount    int64
+	Active           bool
 }
 
 // FailoverEvent records a failover occurrence for audit/metrics.
 type FailoverEvent struct {
-	Timestamp   time.Time
-	FromName    string
-	ToName      string
-	FromTier    int
-	ToTier      int
-	Reason      string
+	Timestamp time.Time
+	FromName  string
+	ToName    string
+	FromTier  int
+	ToTier    int
+	Reason    string
 }
 
 // ProviderSwitchCallback is called when the active provider changes.
@@ -71,11 +71,11 @@ type ProviderSwitchCallback func(newProvider wechat.Provider)
 
 // ProviderManager manages multiple providers with health monitoring and failover.
 type ProviderManager struct {
-	mu       sync.RWMutex
-	log      *slog.Logger
-	cfg      FailoverConfig
-	handler  wechat.MessageHandler
-	metrics  *Metrics
+	mu      sync.RWMutex
+	log     *slog.Logger
+	cfg     FailoverConfig
+	handler wechat.MessageHandler
+	metrics *Metrics
 
 	// Providers sorted by tier (ascending — lower tier = higher priority)
 	providers []*ProviderState
@@ -87,11 +87,11 @@ type ProviderManager struct {
 	onSwitch ProviderSwitchCallback
 
 	// Failover history
-	events    []FailoverEvent
-	eventsMu  sync.Mutex
+	events   []FailoverEvent
+	eventsMu sync.Mutex
 
-	stopCh   chan struct{}
-	running  bool
+	stopCh  chan struct{}
+	running bool
 }
 
 // NewProviderManager creates a new ProviderManager.
@@ -203,6 +203,13 @@ func (pm *ProviderManager) Stop() error {
 			}
 			ps.Active = false
 		}
+	}
+
+	pm.activeIdx = -1
+
+	if pm.metrics != nil {
+		pm.metrics.SetConnected(false)
+		pm.metrics.SetLoginState(int(wechat.LoginStateLoggedOut))
 	}
 
 	return nil

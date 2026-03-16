@@ -92,6 +92,15 @@ func TestASHandler_AuthenticateInvalidToken(t *testing.T) {
 	}
 }
 
+func TestASHandler_AuthenticateEmptyServerToken(t *testing.T) {
+	h := newTestASHandler("")
+
+	req := httptest.NewRequest("GET", "/users/test?access_token=", nil)
+	if h.authenticate(req) {
+		t.Error("should not authenticate when homeserver token is empty")
+	}
+}
+
 func TestASHandler_UserQuery_Forbidden(t *testing.T) {
 	h := newTestASHandler("test_token")
 
@@ -217,6 +226,30 @@ func TestASHandler_Transaction_EmptyEvents(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestASHandler_Transaction_UninitializedRouter(t *testing.T) {
+	h := NewASHandler(slog.Default(), "test_token", nil)
+
+	req := httptest.NewRequest("PUT", "/transactions/txn1?access_token=test_token", bytes.NewBufferString(`{"events":[]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestASHandler_UserQuery_UninitializedPuppets(t *testing.T) {
+	h := NewASHandler(slog.Default(), "test_token", &EventRouter{})
+
+	req := httptest.NewRequest("GET", "/users/@wechat_wxid_test:example.com?access_token=test_token", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
 	}
 }
 

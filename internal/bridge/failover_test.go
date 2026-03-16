@@ -19,8 +19,33 @@ type mockProvider struct {
 	tier       int
 	running    bool
 	loginState wechat.LoginState
+	initErr    error
 	startErr   error
 	failCount  int
+	revokeMsgs []string
+	sentImages []sentMedia
+	sentFiles  []sentMedia
+	sentVideos []sentVideo
+	sentVoices []sentVoice
+}
+
+type sentMedia struct {
+	toUser   string
+	filename string
+	data     []byte
+}
+
+type sentVideo struct {
+	toUser    string
+	filename  string
+	data      []byte
+	thumbnail []byte
+}
+
+type sentVoice struct {
+	toUser   string
+	data     []byte
+	duration int
 }
 
 func newMockProvider(name string, tier int) *mockProvider {
@@ -31,7 +56,9 @@ func newMockProvider(name string, tier int) *mockProvider {
 	}
 }
 
-func (m *mockProvider) Init(_ *wechat.ProviderConfig, _ wechat.MessageHandler) error { return nil }
+func (m *mockProvider) Init(_ *wechat.ProviderConfig, _ wechat.MessageHandler) error {
+	return m.initErr
+}
 
 func (m *mockProvider) Start(_ context.Context) error {
 	m.mu.Lock()
@@ -62,8 +89,8 @@ func (m *mockProvider) Capabilities() wechat.Capability {
 	return wechat.Capability{SendText: true, ReceiveMessage: true}
 }
 
-func (m *mockProvider) Login(_ context.Context) error   { return nil }
-func (m *mockProvider) Logout(_ context.Context) error  { return nil }
+func (m *mockProvider) Login(_ context.Context) error  { return nil }
+func (m *mockProvider) Logout(_ context.Context) error { return nil }
 func (m *mockProvider) GetLoginState() wechat.LoginState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -76,17 +103,42 @@ func (m *mockProvider) GetSelf() *wechat.ContactInfo {
 func (m *mockProvider) SendText(_ context.Context, _ string, _ string) (string, error) {
 	return "msg_" + m.name, nil
 }
-func (m *mockProvider) SendImage(_ context.Context, _ string, _ io.Reader, _ string) (string, error) {
-	return "", nil
+func (m *mockProvider) SendImage(_ context.Context, toUser string, data io.Reader, filename string) (string, error) {
+	body, _ := io.ReadAll(data)
+	m.mu.Lock()
+	m.sentImages = append(m.sentImages, sentMedia{toUser: toUser, filename: filename, data: body})
+	m.mu.Unlock()
+	return "img_" + m.name, nil
 }
-func (m *mockProvider) SendVideo(_ context.Context, _ string, _ io.Reader, _ string, _ io.Reader) (string, error) {
-	return "", nil
+func (m *mockProvider) SendVideo(_ context.Context, toUser string, data io.Reader, filename string, thumb io.Reader) (string, error) {
+	body, _ := io.ReadAll(data)
+	var thumbBody []byte
+	if thumb != nil {
+		thumbBody, _ = io.ReadAll(thumb)
+	}
+	m.mu.Lock()
+	m.sentVideos = append(m.sentVideos, sentVideo{
+		toUser:    toUser,
+		filename:  filename,
+		data:      body,
+		thumbnail: thumbBody,
+	})
+	m.mu.Unlock()
+	return "video_" + m.name, nil
 }
-func (m *mockProvider) SendVoice(_ context.Context, _ string, _ io.Reader, _ int) (string, error) {
-	return "", nil
+func (m *mockProvider) SendVoice(_ context.Context, toUser string, data io.Reader, duration int) (string, error) {
+	body, _ := io.ReadAll(data)
+	m.mu.Lock()
+	m.sentVoices = append(m.sentVoices, sentVoice{toUser: toUser, data: body, duration: duration})
+	m.mu.Unlock()
+	return "voice_" + m.name, nil
 }
-func (m *mockProvider) SendFile(_ context.Context, _ string, _ io.Reader, _ string) (string, error) {
-	return "", nil
+func (m *mockProvider) SendFile(_ context.Context, toUser string, data io.Reader, filename string) (string, error) {
+	body, _ := io.ReadAll(data)
+	m.mu.Lock()
+	m.sentFiles = append(m.sentFiles, sentMedia{toUser: toUser, filename: filename, data: body})
+	m.mu.Unlock()
+	return "file_" + m.name, nil
 }
 func (m *mockProvider) SendLocation(_ context.Context, _ string, _ *wechat.LocationInfo) (string, error) {
 	return "", nil
@@ -94,7 +146,12 @@ func (m *mockProvider) SendLocation(_ context.Context, _ string, _ *wechat.Locat
 func (m *mockProvider) SendLink(_ context.Context, _ string, _ *wechat.LinkCardInfo) (string, error) {
 	return "", nil
 }
-func (m *mockProvider) RevokeMessage(_ context.Context, _ string, _ string) error { return nil }
+func (m *mockProvider) RevokeMessage(_ context.Context, msgID string, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revokeMsgs = append(m.revokeMsgs, msgID)
+	return nil
+}
 func (m *mockProvider) GetContactList(_ context.Context) ([]*wechat.ContactInfo, error) {
 	return nil, nil
 }
@@ -104,8 +161,8 @@ func (m *mockProvider) GetContactInfo(_ context.Context, _ string) (*wechat.Cont
 func (m *mockProvider) GetUserAvatar(_ context.Context, _ string) ([]byte, string, error) {
 	return nil, "", nil
 }
-func (m *mockProvider) AcceptFriendRequest(_ context.Context, _ string) error    { return nil }
-func (m *mockProvider) SetContactRemark(_ context.Context, _, _ string) error    { return nil }
+func (m *mockProvider) AcceptFriendRequest(_ context.Context, _ string) error { return nil }
+func (m *mockProvider) SetContactRemark(_ context.Context, _, _ string) error { return nil }
 func (m *mockProvider) GetGroupList(_ context.Context) ([]*wechat.ContactInfo, error) {
 	return nil, nil
 }
@@ -372,6 +429,31 @@ func TestProviderManager_StopIdempotent(t *testing.T) {
 	pm.Stop()
 	if err := pm.Stop(); err != nil {
 		t.Fatalf("double stop: %v", err)
+	}
+}
+
+func TestProviderManager_StopClearsActiveState(t *testing.T) {
+	log := slog.Default()
+	metrics := NewMetrics()
+	pm := NewProviderManager(log, DefaultFailoverConfig(), metrics)
+
+	pm.AddProvider(newMockProvider("wecom", 1), &wechat.ProviderConfig{})
+	if err := pm.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := pm.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	if pm.Active() != nil {
+		t.Fatal("active provider should be nil after stop")
+	}
+	if pm.ActiveName() != "none" {
+		t.Fatalf("active name after stop: %s", pm.ActiveName())
+	}
+	if metrics.connectedState.Load() != 0 {
+		t.Fatalf("metrics connected state should be cleared, got %d", metrics.connectedState.Load())
 	}
 }
 

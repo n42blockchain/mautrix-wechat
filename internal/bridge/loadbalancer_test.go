@@ -281,6 +281,47 @@ func TestProviderBalancer_RecordSend(t *testing.T) {
 	}
 }
 
+func TestProviderBalancer_RevokeUsesOriginalProviderRoute(t *testing.T) {
+	lb := NewProviderBalancer(BalancerConfig{
+		Strategy: StrategyRoundRobin,
+		Log:      slog.Default(),
+	})
+
+	p1 := newMockProvider("wecom", 1)
+	p1.running = true
+	p2 := newMockProvider("ipad", 2)
+	p2.running = true
+	lb.AddProvider(p1)
+	lb.AddProvider(p2)
+
+	msgID, err := lb.SendText(context.Background(), "user123", "hello")
+	if err != nil {
+		t.Fatalf("send text: %v", err)
+	}
+
+	if err := lb.RevokeMessage(context.Background(), msgID, "user123"); err != nil {
+		t.Fatalf("revoke message: %v", err)
+	}
+
+	if msgID == "msg_wecom" {
+		if len(p1.revokeMsgs) != 1 || p1.revokeMsgs[0] != msgID {
+			t.Fatalf("expected revoke on wecom provider, got %+v", p1.revokeMsgs)
+		}
+		if len(p2.revokeMsgs) != 0 {
+			t.Fatalf("unexpected revoke on secondary provider: %+v", p2.revokeMsgs)
+		}
+	} else if msgID == "msg_ipad" {
+		if len(p2.revokeMsgs) != 1 || p2.revokeMsgs[0] != msgID {
+			t.Fatalf("expected revoke on ipad provider, got %+v", p2.revokeMsgs)
+		}
+		if len(p1.revokeMsgs) != 0 {
+			t.Fatalf("unexpected revoke on secondary provider: %+v", p1.revokeMsgs)
+		}
+	} else {
+		t.Fatalf("unexpected message id: %s", msgID)
+	}
+}
+
 func TestBoolToInt64(t *testing.T) {
 	if boolToInt64(true) != 1 {
 		t.Error("true should be 1")

@@ -23,6 +23,11 @@ type MessageMappingStore struct {
 	db *sql.DB
 }
 
+// NewMessageMappingStore creates a MessageMappingStore from an existing sql.DB.
+func NewMessageMappingStore(db *sql.DB) *MessageMappingStore {
+	return &MessageMappingStore{db: db}
+}
+
 // Insert creates a new message mapping.
 func (s *MessageMappingStore) Insert(ctx context.Context, m *MessageMapping) error {
 	_, err := s.db.ExecContext(ctx, `
@@ -58,6 +63,22 @@ func (s *MessageMappingStore) GetByWeChatMsgID(ctx context.Context, msgID, roomI
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get message by wechat id: %w", err)
+	}
+	return m, nil
+}
+
+// GetLatestByWeChatMsgID looks up the most recently inserted mapping for a WeChat message ID.
+// This is used for callbacks like revocations where the room ID is not available from the provider.
+func (s *MessageMappingStore) GetLatestByWeChatMsgID(ctx context.Context, msgID string) (*MessageMapping, error) {
+	m := &MessageMapping{}
+	err := scanMessageMapping(s.db.QueryRowContext(ctx,
+		`SELECT `+messageMappingColumns+` FROM message_mapping WHERE wechat_msg_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		msgID), m)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest message by wechat id: %w", err)
 	}
 	return m, nil
 }

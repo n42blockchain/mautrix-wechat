@@ -33,6 +33,10 @@ func (ch *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if ch.handler == nil {
+		http.Error(w, "handler unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
 	var payload map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -51,6 +55,11 @@ func (ch *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // dispatch routes the callback payload to the appropriate handler.
 func (ch *CallbackHandler) dispatch(ctx context.Context, payload map[string]interface{}) {
+	if ch.handler == nil {
+		ch.log.Warn("callback handler not configured, dropping payload")
+		return
+	}
+
 	cbType, _ := payload["type"].(string)
 
 	switch cbType {

@@ -50,6 +50,9 @@ type ProviderBalancer struct {
 
 	// Sticky routing: chatID → slot index
 	stickyMap sync.Map
+
+	// Message routing: msgID → provider name for revoke consistency.
+	messageRoutes sync.Map
 }
 
 // NewProviderBalancer creates a new load balancer.
@@ -202,6 +205,25 @@ func (lb *ProviderBalancer) recordSend(name string, success bool) {
 	}
 }
 
+func (lb *ProviderBalancer) rememberMessageRoute(msgID, providerName string) {
+	if msgID == "" || providerName == "" {
+		return
+	}
+	lb.messageRoutes.Store(msgID, providerName)
+}
+
+func (lb *ProviderBalancer) lookupProviderByName(name string) wechat.Provider {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	for _, slot := range lb.slots {
+		if slot.provider.Name() == name {
+			return slot.provider
+		}
+	}
+	return nil
+}
+
 // GetStats returns per-provider statistics.
 func (lb *ProviderBalancer) GetStats() map[string]map[string]int64 {
 	lb.mu.RLock()
@@ -238,6 +260,9 @@ func (lb *ProviderBalancer) SendText(ctx context.Context, toUser string, text st
 
 	msgID, err := p.SendText(ctx, toUser, text)
 	lb.recordSend(p.Name(), err == nil)
+	if err == nil {
+		lb.rememberMessageRoute(msgID, p.Name())
+	}
 	return msgID, err
 }
 
@@ -250,6 +275,9 @@ func (lb *ProviderBalancer) SendImage(ctx context.Context, toUser string, data i
 
 	msgID, err := p.SendImage(ctx, toUser, data, filename)
 	lb.recordSend(p.Name(), err == nil)
+	if err == nil {
+		lb.rememberMessageRoute(msgID, p.Name())
+	}
 	return msgID, err
 }
 
@@ -262,17 +290,36 @@ func (lb *ProviderBalancer) SendFile(ctx context.Context, toUser string, data io
 
 	msgID, err := p.SendFile(ctx, toUser, data, filename)
 	lb.recordSend(p.Name(), err == nil)
+	if err == nil {
+		lb.rememberMessageRoute(msgID, p.Name())
+	}
 	return msgID, err
 }
 
 // RevokeMessage revokes a message through the appropriate provider.
 func (lb *ProviderBalancer) RevokeMessage(ctx context.Context, msgID string, toUser string) error {
+	if cached, ok := lb.messageRoutes.Load(msgID); ok {
+		if providerName, _ := cached.(string); providerName != "" {
+			if p := lb.lookupProviderByName(providerName); p != nil && p.IsRunning() {
+				err := p.RevokeMessage(ctx, msgID, toUser)
+				if err == nil {
+					lb.messageRoutes.Delete(msgID)
+				}
+				return err
+			}
+		}
+	}
+
 	p, err := lb.selectProvider(toUser)
 	if err != nil {
 		return err
 	}
 
-	return p.RevokeMessage(ctx, msgID, toUser)
+	err = p.RevokeMessage(ctx, msgID, toUser)
+	if err == nil {
+		lb.messageRoutes.Delete(msgID)
+	}
+	return err
 }
 
 func boolToInt64(b bool) int64 {

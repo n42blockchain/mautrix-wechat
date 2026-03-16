@@ -32,6 +32,11 @@ type UserStore struct {
 	db *sql.DB
 }
 
+// NewUserStore creates a UserStore from an existing sql.DB.
+func NewUserStore(db *sql.DB) *UserStore {
+	return &UserStore{db: db}
+}
+
 // Upsert inserts or updates a WeChat user record.
 func (s *UserStore) Upsert(ctx context.Context, u *WeChatUser) error {
 	_, err := s.db.ExecContext(ctx, `

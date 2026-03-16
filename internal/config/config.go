@@ -97,29 +97,29 @@ type MediaConfig struct {
 
 // ProvidersConfig holds configuration for all provider types.
 type ProvidersConfig struct {
-	WeCom    WeComProviderConfig    `yaml:"wecom"`
-	PadPro   PadProProviderConfig   `yaml:"padpro"`
-	IPad     IPadProviderConfig     `yaml:"ipad"`
-	PCHook   PCHookProviderConfig   `yaml:"pchook"`
-	Failover FailoverConfig         `yaml:"failover"`
+	WeCom    WeComProviderConfig  `yaml:"wecom"`
+	PadPro   PadProProviderConfig `yaml:"padpro"`
+	IPad     IPadProviderConfig   `yaml:"ipad"`
+	PCHook   PCHookProviderConfig `yaml:"pchook"`
+	Failover FailoverConfig       `yaml:"failover"`
 }
 
 // FailoverConfig controls automatic provider failover and recovery.
 type FailoverConfig struct {
-	Enabled               bool `yaml:"enabled"`
-	HealthCheckIntervalS  int  `yaml:"health_check_interval_s"`
-	FailureThreshold      int  `yaml:"failure_threshold"`
-	RecoveryCheckIntervalS int `yaml:"recovery_check_interval_s"`
-	RecoveryThreshold     int  `yaml:"recovery_threshold"`
+	Enabled                bool `yaml:"enabled"`
+	HealthCheckIntervalS   int  `yaml:"health_check_interval_s"`
+	FailureThreshold       int  `yaml:"failure_threshold"`
+	RecoveryCheckIntervalS int  `yaml:"recovery_check_interval_s"`
+	RecoveryThreshold      int  `yaml:"recovery_threshold"`
 }
 
 // WeComProviderConfig holds WeCom (enterprise WeChat) settings.
 type WeComProviderConfig struct {
-	Enabled   bool                   `yaml:"enabled"`
-	CorpID    string                 `yaml:"corp_id"`
-	AppSecret string                 `yaml:"app_secret"`
-	AgentID   int                    `yaml:"agent_id"`
-	Callback  WeComCallbackConfig    `yaml:"callback"`
+	Enabled   bool                `yaml:"enabled"`
+	CorpID    string              `yaml:"corp_id"`
+	AppSecret string              `yaml:"app_secret"`
+	AgentID   int                 `yaml:"agent_id"`
+	Callback  WeComCallbackConfig `yaml:"callback"`
 }
 
 // WeComCallbackConfig holds WeCom callback verification settings.
@@ -132,9 +132,10 @@ type WeComCallbackConfig struct {
 // PadProProviderConfig holds WeChatPadPro settings (recommended replacement for GeWeChat).
 //
 // WeChatPadPro deployment:
-//   Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
-//   External port: 1239
-//   Dependencies: MySQL 8.0 + Redis 6
+//
+//	Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+//	External port: 1239
+//	Dependencies: MySQL 8.0 + Redis 6
 type PadProProviderConfig struct {
 	Enabled      bool              `yaml:"enabled"`
 	APIEndpoint  string            `yaml:"api_endpoint"`  // e.g. http://wechatpadpro:1239
@@ -143,6 +144,22 @@ type PadProProviderConfig struct {
 	WebhookURL   string            `yaml:"webhook_url"`   // optional webhook callback URL
 	CallbackPort int               `yaml:"callback_port"` // local port for webhook callback server
 	RiskControl  RiskControlConfig `yaml:"risk_control"`
+
+	// Multi-tenant settings: each n42chat user logs in with their own WeChat account,
+	// distributed across multiple PadPro server nodes to reduce ban risk.
+	MultiTenant     bool               `yaml:"multi_tenant"`
+	MaxUsersPerNode int                `yaml:"max_users_per_node"` // default 10
+	Nodes           []PadProNodeConfig `yaml:"nodes"`
+}
+
+// PadProNodeConfig holds configuration for a single PadPro server node in multi-tenant mode.
+type PadProNodeConfig struct {
+	ID          string `yaml:"id"`           // unique node identifier, e.g. "node-01"
+	APIEndpoint string `yaml:"api_endpoint"` // e.g. http://10.0.1.1:1239
+	AuthKey     string `yaml:"auth_key"`     // API auth key for this node
+	WSEndpoint  string `yaml:"ws_endpoint"`  // optional WebSocket endpoint
+	MaxUsers    int    `yaml:"max_users"`    // per-node max users, overrides global max_users_per_node
+	Enabled     bool   `yaml:"enabled"`      // whether this node is active
 }
 
 // IPadProviderConfig holds iPad protocol (GeWeChat) settings.
@@ -361,11 +378,48 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.Providers.PadPro.Enabled {
-		if c.Providers.PadPro.APIEndpoint == "" {
-			return fmt.Errorf("providers.padpro.api_endpoint is required when padpro is enabled")
-		}
-		if c.Providers.PadPro.AuthKey == "" {
-			return fmt.Errorf("providers.padpro.auth_key is required when padpro is enabled")
+		if c.Providers.PadPro.MultiTenant {
+			// Multi-tenant mode: validate node configuration
+			if c.Providers.PadPro.MaxUsersPerNode == 0 {
+				c.Providers.PadPro.MaxUsersPerNode = 10
+			}
+			enabledNodes := 0
+			seenIDs := make(map[string]bool)
+			for i := range c.Providers.PadPro.Nodes {
+				node := &c.Providers.PadPro.Nodes[i]
+				if !node.Enabled {
+					continue
+				}
+				if node.ID == "" {
+					return fmt.Errorf("providers.padpro.nodes[%d].id is required", i)
+				}
+				if seenIDs[node.ID] {
+					return fmt.Errorf("providers.padpro.nodes[%d].id %q is duplicated", i, node.ID)
+				}
+				seenIDs[node.ID] = true
+				if node.APIEndpoint == "" {
+					return fmt.Errorf("providers.padpro.nodes[%d].api_endpoint is required", i)
+				}
+				if node.AuthKey == "" {
+					return fmt.Errorf("providers.padpro.nodes[%d].auth_key is required", i)
+				}
+				if node.MaxUsers == 0 {
+					node.MaxUsers = c.Providers.PadPro.MaxUsersPerNode
+				}
+				enabledNodes++
+			}
+			if enabledNodes == 0 {
+				return fmt.Errorf("providers.padpro: multi_tenant requires at least 1 enabled node")
+			}
+			// api_endpoint and auth_key are optional in multi-tenant mode (nodes provide their own)
+		} else {
+			// Single-node mode: require top-level api_endpoint and auth_key
+			if c.Providers.PadPro.APIEndpoint == "" {
+				return fmt.Errorf("providers.padpro.api_endpoint is required when padpro is enabled")
+			}
+			if c.Providers.PadPro.AuthKey == "" {
+				return fmt.Errorf("providers.padpro.auth_key is required when padpro is enabled")
+			}
 		}
 		// ws_endpoint is optional; derived from api_endpoint if not set
 	}

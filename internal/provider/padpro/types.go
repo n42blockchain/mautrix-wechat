@@ -53,7 +53,9 @@ type sendImageRequest struct {
 type sendVideoRequest struct {
 	ToUserName string `json:"to_user_name"`
 	VideoURL   string `json:"video_url,omitempty"`
+	VideoData  string `json:"video_data,omitempty"` // base64 encoded
 	ThumbURL   string `json:"thumb_url,omitempty"`
+	ThumbData  string `json:"thumb_data,omitempty"` // base64 encoded
 }
 
 type sendVoiceRequest struct {
@@ -66,6 +68,7 @@ type sendVoiceRequest struct {
 type sendFileRequest struct {
 	ToUserName string `json:"to_user_name"`
 	FileURL    string `json:"file_url,omitempty"`
+	FileData   string `json:"file_data,omitempty"` // base64 encoded
 	FileName   string `json:"file_name"`
 }
 

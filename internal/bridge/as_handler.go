@@ -25,14 +25,14 @@ type ASTransaction struct {
 
 // ASEvent represents a single event in an AS transaction.
 type ASEvent struct {
-	ID              string                 `json:"event_id"`
-	Type            string                 `json:"type"`
-	RoomID          string                 `json:"room_id"`
-	Sender          string                 `json:"sender"`
-	Content         map[string]interface{} `json:"content"`
-	OriginServerTS  int64                  `json:"origin_server_ts"`
-	Unsigned        map[string]interface{} `json:"unsigned,omitempty"`
-	StateKey        *string                `json:"state_key,omitempty"`
+	ID             string                 `json:"event_id"`
+	Type           string                 `json:"type"`
+	RoomID         string                 `json:"room_id"`
+	Sender         string                 `json:"sender"`
+	Content        map[string]interface{} `json:"content"`
+	OriginServerTS int64                  `json:"origin_server_ts"`
+	Unsigned       map[string]interface{} `json:"unsigned,omitempty"`
+	StateKey       *string                `json:"state_key,omitempty"`
 }
 
 // NewASHandler creates a new Application Service HTTP handler.
@@ -72,12 +72,19 @@ func (h *ASHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // authenticate verifies the homeserver token from the request.
 func (h *ASHandler) authenticate(r *http.Request) bool {
+	if h.hsToken == "" {
+		return false
+	}
+
 	token := r.URL.Query().Get("access_token")
 	if token == "" {
 		auth := r.Header.Get("Authorization")
 		if strings.HasPrefix(auth, "Bearer ") {
 			token = strings.TrimPrefix(auth, "Bearer ")
 		}
+	}
+	if token == "" {
+		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(h.hsToken)) == 1
 }
@@ -86,6 +93,10 @@ func (h *ASHandler) authenticate(r *http.Request) bool {
 func (h *ASHandler) handleTransaction(w http.ResponseWriter, r *http.Request) {
 	if !h.authenticate(r) {
 		h.jsonError(w, http.StatusForbidden, "M_FORBIDDEN", "bad token")
+		return
+	}
+	if h.eventRouter == nil {
+		h.jsonError(w, http.StatusServiceUnavailable, "M_UNAVAILABLE", "event router not initialized")
 		return
 	}
 
@@ -122,6 +133,10 @@ func (h *ASHandler) handleTransaction(w http.ResponseWriter, r *http.Request) {
 func (h *ASHandler) handleUserQuery(w http.ResponseWriter, r *http.Request) {
 	if !h.authenticate(r) {
 		h.jsonError(w, http.StatusForbidden, "M_FORBIDDEN", "bad token")
+		return
+	}
+	if h.eventRouter == nil || h.eventRouter.puppets == nil {
+		h.jsonError(w, http.StatusServiceUnavailable, "M_UNAVAILABLE", "puppet manager not initialized")
 		return
 	}
 

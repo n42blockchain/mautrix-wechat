@@ -95,6 +95,18 @@ func (p *defaultMessageProcessor) MatrixToWeChat(_ context.Context, evt *MatrixE
 			File: extractMXCURL(evt.Content),
 		}, nil
 
+	case "m.video":
+		return &WeChatSendAction{
+			Type: wechat.MsgVideo,
+			File: extractMXCURL(evt.Content),
+		}, nil
+
+	case "m.audio":
+		return &WeChatSendAction{
+			Type: wechat.MsgVoice,
+			File: extractMXCURL(evt.Content),
+		}, nil
+
 	case "m.file":
 		return &WeChatSendAction{
 			Type: wechat.MsgFile,

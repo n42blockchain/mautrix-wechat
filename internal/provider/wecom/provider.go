@@ -33,9 +33,9 @@ type Provider struct {
 	running    bool
 	log        *slog.Logger
 
-	client     *Client
+	client      *Client
 	callbackSrv *CallbackServer
-	crypto     *CallbackCrypto
+	crypto      *CallbackCrypto
 }
 
 // --- Lifecycle ---
@@ -66,15 +66,15 @@ func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandle
 
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.running {
+		p.mu.Unlock()
 		return nil
 	}
 
 	// Verify token by fetching it
 	token, err := p.client.GetToken(ctx)
 	if err != nil {
+		p.mu.Unlock()
 		return fmt.Errorf("initial token fetch: %w", err)
 	}
 	_ = token
@@ -94,12 +94,20 @@ func (p *Provider) Start(ctx context.Context) error {
 			p.handler,
 		)
 		if err := p.callbackSrv.Start(callbackPort); err != nil {
+			p.mu.Unlock()
 			return fmt.Errorf("start callback server: %w", err)
 		}
 	}
+	p.mu.Unlock()
 
 	// Fetch self info
 	p.fetchSelfInfo(ctx)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running {
+		return nil
+	}
 
 	p.running = true
 	p.loginState = wechat.LoginStateLoggedIn
@@ -137,7 +145,7 @@ func (p *Provider) IsRunning() bool {
 // --- Identity ---
 
 func (p *Provider) Name() string { return "wecom" }
-func (p *Provider) Tier() int   { return 1 }
+func (p *Provider) Tier() int    { return 1 }
 
 func (p *Provider) Capabilities() wechat.Capability {
 	return wechat.Capability{
@@ -150,7 +158,7 @@ func (p *Provider) Capabilities() wechat.Capability {
 		SendLink:       true,
 		SendMiniApp:    false,
 		ReceiveMessage: true,
-		GroupManage:     true,
+		GroupManage:    true,
 		ContactManage:  true,
 		MomentAccess:   false,
 		VoiceCall:      false,

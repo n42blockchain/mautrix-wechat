@@ -24,6 +24,11 @@ type BridgeUserStore struct {
 	db *sql.DB
 }
 
+// NewBridgeUserStore creates a BridgeUserStore from an existing sql.DB.
+func NewBridgeUserStore(db *sql.DB) *BridgeUserStore {
+	return &BridgeUserStore{db: db}
+}
+
 // Upsert inserts or updates a bridge user.
 func (s *BridgeUserStore) Upsert(ctx context.Context, u *BridgeUser) error {
 	_, err := s.db.ExecContext(ctx, `

@@ -3,7 +3,9 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +40,10 @@ type EventRouter struct {
 	matrixClient MatrixClient
 	crypto       CryptoHelper
 	metrics      *Metrics
+
+	// Multi-tenant fields
+	sessionManager *SessionManager
+	multiTenant    bool
 }
 
 // MessageProcessor converts between WeChat and Matrix message formats.
@@ -79,6 +85,10 @@ type EventRouterConfig struct {
 	MatrixClient MatrixClient
 	Crypto       CryptoHelper
 	Metrics      *Metrics
+
+	// Multi-tenant fields
+	SessionManager *SessionManager
+	MultiTenant    bool
 }
 
 // NewEventRouter creates a new EventRouter.
@@ -88,18 +98,27 @@ func NewEventRouter(cfg EventRouterConfig) *EventRouter {
 		crypto = &noopCryptoHelper{}
 	}
 	return &EventRouter{
-		log:          cfg.Log,
-		puppets:      cfg.Puppets,
-		processor:    cfg.Processor,
-		provider:     cfg.Provider,
-		rooms:        cfg.Rooms,
-		messages:     cfg.Messages,
-		bridgeUsers:  cfg.BridgeUsers,
-		groupMembers: cfg.GroupMembers,
-		matrixClient: cfg.MatrixClient,
-		crypto:       crypto,
-		metrics:      cfg.Metrics,
+		log:            cfg.Log,
+		puppets:        cfg.Puppets,
+		processor:      cfg.Processor,
+		provider:       cfg.Provider,
+		rooms:          cfg.Rooms,
+		messages:       cfg.Messages,
+		bridgeUsers:    cfg.BridgeUsers,
+		groupMembers:   cfg.GroupMembers,
+		matrixClient:   cfg.MatrixClient,
+		crypto:         crypto,
+		metrics:        cfg.Metrics,
+		sessionManager: cfg.SessionManager,
+		multiTenant:    cfg.MultiTenant,
 	}
+}
+
+// SetSessionManager sets the session manager after EventRouter creation.
+// Used when SessionManager and EventRouter have a circular dependency.
+func (er *EventRouter) SetSessionManager(sm *SessionManager) {
+	er.sessionManager = sm
+	er.multiTenant = true
 }
 
 // SetProvider updates the active provider (used when failover switches providers).
@@ -179,17 +198,26 @@ func (er *EventRouter) handleMatrixMessage(ctx context.Context, evt *MatrixEvent
 
 	// Resolve reply-to: convert Matrix event ID → WeChat message ID
 	if action.ReplyTo != "" {
-		mapping, err := er.messages.GetByMatrixEventID(ctx, action.ReplyTo)
-		if err == nil && mapping != nil {
-			action.ReplyTo = mapping.WeChatMsgID
-		} else {
-			er.log.Debug("reply-to matrix event not found in mapping",
+		if er.messages == nil {
+			er.log.Warn("message store not initialized, dropping reply-to relation",
 				"event_id", action.ReplyTo)
 			action.ReplyTo = ""
+		} else {
+			mapping, err := er.messages.GetByMatrixEventID(ctx, action.ReplyTo)
+			if err == nil && mapping != nil {
+				action.ReplyTo = mapping.WeChatMsgID
+			} else {
+				er.log.Debug("reply-to matrix event not found in mapping",
+					"event_id", action.ReplyTo)
+				action.ReplyTo = ""
+			}
 		}
 	}
 
-	provider := er.getProvider()
+	provider, err := er.getProviderForRoom(ctx, room)
+	if err != nil {
+		return fmt.Errorf("get provider for room: %w", err)
+	}
 	if provider == nil {
 		return fmt.Errorf("no active provider")
 	}
@@ -201,11 +229,15 @@ func (er *EventRouter) handleMatrixMessage(ctx context.Context, evt *MatrixEvent
 	case wechat.MsgText:
 		msgID, err = provider.SendText(ctx, target, action.Text)
 	case wechat.MsgImage:
-		er.log.Warn("image sending from Matrix not yet fully implemented")
-		return nil
+		msgID, err = er.sendMatrixMedia(ctx, provider, target, action, evt.Content)
+	case wechat.MsgVideo:
+		msgID, err = er.sendMatrixMedia(ctx, provider, target, action, evt.Content)
+	case wechat.MsgVoice:
+		msgID, err = er.sendMatrixMedia(ctx, provider, target, action, evt.Content)
+	case wechat.MsgFile:
+		msgID, err = er.sendMatrixMedia(ctx, provider, target, action, evt.Content)
 	default:
-		er.log.Warn("unsupported wechat send type", "type", action.Type)
-		return nil
+		return fmt.Errorf("unsupported wechat send type: %d", action.Type)
 	}
 
 	if err != nil {
@@ -228,7 +260,10 @@ func (er *EventRouter) handleMatrixMessage(ctx context.Context, evt *MatrixEvent
 			Sender:        evt.Sender,
 			MsgType:       int(action.Type),
 		}
-		if err := er.messages.Insert(ctx, mapping); err != nil {
+		if er.messages == nil {
+			er.log.Warn("message store not initialized, skipping mapping save",
+				"matrix_event", evt.ID, "wechat_msg", msgID)
+		} else if err := er.messages.Insert(ctx, mapping); err != nil {
 			er.log.Error("failed to save message mapping", "error", err)
 		}
 	}
@@ -236,11 +271,135 @@ func (er *EventRouter) handleMatrixMessage(ctx context.Context, evt *MatrixEvent
 	return nil
 }
 
+func (er *EventRouter) sendMatrixMedia(ctx context.Context, provider wechat.Provider, target string, action *WeChatSendAction, content map[string]interface{}) (string, error) {
+	if er.matrixClient == nil {
+		return "", fmt.Errorf("matrix client not configured, cannot download media")
+	}
+
+	mxcURL := matrixMediaMXCURL(action, content)
+	if mxcURL == "" {
+		return "", fmt.Errorf("matrix media event missing url")
+	}
+
+	reader, _, err := er.matrixClient.DownloadMedia(ctx, mxcURL)
+	if err != nil {
+		return "", fmt.Errorf("download matrix media %s: %w", mxcURL, err)
+	}
+	defer reader.Close()
+
+	filename := matrixMediaFilename(action, content)
+	switch action.Type {
+	case wechat.MsgImage:
+		return provider.SendImage(ctx, target, reader, filename)
+	case wechat.MsgVideo:
+		var thumbReader io.ReadCloser
+		thumbURL := matrixMediaThumbnailURL(content)
+		if thumbURL != "" {
+			thumbReader, _, err = er.matrixClient.DownloadMedia(ctx, thumbURL)
+			if err != nil {
+				er.log.Warn("failed to download matrix media thumbnail, continuing without thumbnail",
+					"url", thumbURL, "error", err)
+			}
+		}
+		if thumbReader != nil {
+			defer thumbReader.Close()
+		}
+		return provider.SendVideo(ctx, target, reader, filename, thumbReader)
+	case wechat.MsgVoice:
+		return provider.SendVoice(ctx, target, reader, matrixMediaDurationSeconds(content))
+	case wechat.MsgFile:
+		return provider.SendFile(ctx, target, reader, filename)
+	default:
+		return "", fmt.Errorf("unsupported matrix media send type: %d", action.Type)
+	}
+}
+
+func matrixMediaMXCURL(action *WeChatSendAction, content map[string]interface{}) string {
+	if action != nil && action.Extra != nil {
+		if mxcURL, ok := action.Extra["mxc_url"].(string); ok && mxcURL != "" {
+			return mxcURL
+		}
+	}
+	if action != nil && strings.HasPrefix(action.File, "mxc://") {
+		return action.File
+	}
+	if mxcURL, ok := content["url"].(string); ok {
+		return mxcURL
+	}
+	return ""
+}
+
+func matrixMediaFilename(action *WeChatSendAction, content map[string]interface{}) string {
+	if action != nil && action.File != "" && !strings.HasPrefix(action.File, "mxc://") {
+		return action.File
+	}
+	if body, ok := content["body"].(string); ok && body != "" {
+		return body
+	}
+	if action != nil {
+		switch action.Type {
+		case wechat.MsgImage:
+			return "image"
+		case wechat.MsgVideo:
+			return "video.mp4"
+		case wechat.MsgVoice:
+			return "voice"
+		}
+	}
+	return "file"
+}
+
+func matrixMediaThumbnailURL(content map[string]interface{}) string {
+	info, ok := content["info"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if thumbURL, ok := info["thumbnail_url"].(string); ok {
+		return thumbURL
+	}
+	return ""
+}
+
+func matrixMediaDurationSeconds(content map[string]interface{}) int {
+	info, ok := content["info"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+
+	raw, ok := info["duration"]
+	if !ok {
+		return 0
+	}
+
+	switch v := raw.(type) {
+	case float64:
+		if v >= 1000 {
+			return int((v + 999) / 1000)
+		}
+		return int(v)
+	case int:
+		if v >= 1000 {
+			return (v + 999) / 1000
+		}
+		return v
+	case int64:
+		if v >= 1000 {
+			return int((v + 999) / 1000)
+		}
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 // handleMatrixRedaction processes a Matrix redaction event (Matrix → WeChat revoke).
 func (er *EventRouter) handleMatrixRedaction(ctx context.Context, evt *MatrixEvent, room *database.RoomMapping) error {
 	redactedEventID, _ := evt.Content["redacts"].(string)
 	if redactedEventID == "" {
 		return nil
+	}
+	if er.messages == nil {
+		return fmt.Errorf("message store not initialized")
 	}
 
 	mapping, err := er.messages.GetByMatrixEventID(ctx, redactedEventID)
@@ -252,7 +411,10 @@ func (er *EventRouter) handleMatrixRedaction(ctx context.Context, evt *MatrixEve
 		return nil
 	}
 
-	provider := er.getProvider()
+	provider, err := er.getProviderForRoom(ctx, room)
+	if err != nil {
+		return fmt.Errorf("get provider for redaction: %w", err)
+	}
 	if provider == nil {
 		return fmt.Errorf("no active provider")
 	}
@@ -388,7 +550,10 @@ func (er *EventRouter) OnMessage(ctx context.Context, msg *wechat.Message) error
 		Sender:        msg.FromUser,
 		MsgType:       int(msg.Type),
 	}
-	if err := er.messages.Insert(ctx, mapping); err != nil {
+	if er.messages == nil {
+		er.log.Warn("message store not initialized, skipping mapping save",
+			"wechat_msg", msg.MsgID)
+	} else if err := er.messages.Insert(ctx, mapping); err != nil {
 		er.log.Error("failed to save message mapping", "error", err)
 	}
 
@@ -397,7 +562,70 @@ func (er *EventRouter) OnMessage(ctx context.Context, msg *wechat.Message) error
 
 // OnLoginEvent handles login state changes from the provider.
 func (er *EventRouter) OnLoginEvent(ctx context.Context, evt *wechat.LoginEvent) error {
-	er.log.Info("login event", "state", evt.State)
+	if evt == nil {
+		return fmt.Errorf("login event is nil")
+	}
+	if er.bridgeUsers == nil {
+		er.log.Warn("bridge user store not initialized, skipping login event persistence")
+		return nil
+	}
+
+	bridgeUserID, err := er.resolveLoginEventBridgeUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	er.log.Info("login event",
+		"state", evt.State,
+		"bridge_user", bridgeUserID,
+		"wechat_id", evt.UserID)
+
+	if bridgeUserID == "" {
+		return nil
+	}
+
+	providerType := er.loginEventProviderType()
+	existing, err := er.bridgeUsers.GetByMatrixID(ctx, bridgeUserID)
+	if err != nil {
+		return fmt.Errorf("get bridge user for login event: %w", err)
+	}
+
+	bridgeUser := &database.BridgeUser{
+		MatrixUserID: bridgeUserID,
+		ProviderType: providerType,
+		LoginState:   int(evt.State),
+	}
+	if existing != nil {
+		bridgeUser = existing
+		if providerType != "" {
+			bridgeUser.ProviderType = providerType
+		}
+		bridgeUser.LoginState = int(evt.State)
+	}
+	if bridgeUser.ProviderType == "" {
+		bridgeUser.ProviderType = "padpro"
+	}
+	if evt.UserID != "" {
+		bridgeUser.WeChatID = evt.UserID
+	}
+	if evt.State == wechat.LoginStateLoggedIn {
+		now := time.Now()
+		bridgeUser.LastLogin = &now
+	}
+
+	if err := er.bridgeUsers.Upsert(ctx, bridgeUser); err != nil {
+		return fmt.Errorf("upsert bridge user for login event: %w", err)
+	}
+
+	if er.multiTenant && er.sessionManager != nil {
+		er.sessionManager.UpdateSessionLoginState(bridgeUserID, evt.State)
+		if er.sessionManager.db != nil && er.sessionManager.db.NodeAssignment != nil {
+			if err := er.sessionManager.db.NodeAssignment.UpdateLoginState(ctx, bridgeUserID, int(evt.State), evt.UserID); err != nil {
+				return fmt.Errorf("update node assignment login state: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -558,7 +786,11 @@ func (er *EventRouter) OnRevoke(ctx context.Context, msgID string, replaceTip st
 	if er.matrixClient == nil {
 		return nil
 	}
-	mapping, err := er.messages.GetByWeChatMsgID(ctx, msgID, "")
+	if er.messages == nil {
+		er.log.Warn("message store not initialized, cannot bridge revoke", "msg_id", msgID)
+		return nil
+	}
+	mapping, err := er.messages.GetLatestByWeChatMsgID(ctx, msgID)
 	if err != nil || mapping == nil {
 		er.log.Debug("ignoring revoke for unknown message", "msg_id", msgID)
 		return nil
@@ -582,6 +814,12 @@ func (er *EventRouter) OnRevoke(ctx context.Context, msgID string, replaceTip st
 
 // resolveReplyTo converts a WeChat reply-to message ID to a Matrix m.in_reply_to reference.
 func (er *EventRouter) resolveReplyTo(ctx context.Context, wechatMsgID, matrixRoomID string, content *MatrixEventContent) {
+	if er.messages == nil {
+		er.log.Warn("message store not initialized, cannot resolve reply",
+			"wechat_msg_id", wechatMsgID)
+		return
+	}
+
 	mapping, err := er.messages.GetByWeChatMsgID(ctx, wechatMsgID, matrixRoomID)
 	if err != nil || mapping == nil {
 		er.log.Debug("reply-to message not found in mapping", "wechat_msg_id", wechatMsgID)
@@ -600,8 +838,14 @@ func (er *EventRouter) resolveReplyTo(ctx context.Context, wechatMsgID, matrixRo
 
 // syncPuppetAvatar downloads a WeChat avatar and uploads it to Matrix.
 func (er *EventRouter) syncPuppetAvatar(ctx context.Context, puppet *Puppet, contact *wechat.ContactInfo) {
-	provider := er.getProvider()
-	if provider == nil {
+	if er.matrixClient == nil {
+		er.log.Warn("matrixClient not configured, cannot sync avatar",
+			"user_id", contact.UserID)
+		return
+	}
+
+	provider, err := er.getProviderForContext(ctx)
+	if err != nil || provider == nil {
 		er.log.Warn("no active provider, cannot sync avatar",
 			"user_id", contact.UserID)
 		return
@@ -681,6 +925,9 @@ func (er *EventRouter) BackfillRoom(ctx context.Context, room *database.RoomMapp
 	if er.processor == nil || er.matrixClient == nil {
 		return fmt.Errorf("processor or matrixClient not initialized for backfill")
 	}
+	if er.messages == nil {
+		return fmt.Errorf("message store not initialized for backfill")
+	}
 
 	er.log.Info("backfilling room",
 		"room_id", room.MatrixRoomID,
@@ -740,11 +987,26 @@ func (er *EventRouter) BackfillRoom(ctx context.Context, room *database.RoomMapp
 
 // === Helpers ===
 
-// findBridgeUser returns the first logged-in bridge user (single-user mode).
+// findBridgeUser returns the bridge user for the current context.
+// In multi-tenant mode, extracts bridge user ID from context (injected by userMessageHandler).
+// In single-user mode, returns the first logged-in bridge user.
 func (er *EventRouter) findBridgeUser(ctx context.Context) (*database.BridgeUser, error) {
+	if er.multiTenant {
+		uid, ok := BridgeUserFromContext(ctx)
+		if !ok || uid == "" {
+			return nil, fmt.Errorf("multi-tenant bridge user context missing")
+		}
+		if er.bridgeUsers == nil {
+			return nil, fmt.Errorf("bridge user store not initialized")
+		}
+		return er.bridgeUsers.GetByMatrixID(ctx, uid)
+	}
+
 	if er.bridgeUsers == nil {
 		return nil, fmt.Errorf("bridge user store not initialized")
 	}
+
+	// Fallback: single-user mode — return first logged-in user
 	users, err := er.bridgeUsers.GetAll(ctx)
 	if err != nil {
 		return nil, err
@@ -755,6 +1017,71 @@ func (er *EventRouter) findBridgeUser(ctx context.Context) (*database.BridgeUser
 		}
 	}
 	return nil, nil
+}
+
+// === Multi-tenant provider routing helpers ===
+
+// getProviderForRoom returns the appropriate provider for a room.
+// In multi-tenant mode, it looks up the provider via the room's bridge user.
+func (er *EventRouter) getProviderForRoom(ctx context.Context, room *database.RoomMapping) (wechat.Provider, error) {
+	if !er.multiTenant {
+		return er.getProvider(), nil
+	}
+	return er.getProviderForUser(ctx, room.BridgeUser)
+}
+
+// getProviderForUser returns the provider for a specific bridge user.
+func (er *EventRouter) getProviderForUser(ctx context.Context, bridgeUserID string) (wechat.Provider, error) {
+	if !er.multiTenant {
+		return er.getProvider(), nil
+	}
+	if er.sessionManager == nil {
+		return nil, fmt.Errorf("session manager not initialized")
+	}
+	p, ok := er.sessionManager.GetProvider(bridgeUserID)
+	if !ok {
+		return nil, fmt.Errorf("no active session for user %s", bridgeUserID)
+	}
+	return p, nil
+}
+
+// getProviderForContext returns the provider based on bridge user ID in the context.
+// Falls back to the default provider in single-user mode.
+func (er *EventRouter) getProviderForContext(ctx context.Context) (wechat.Provider, error) {
+	if !er.multiTenant {
+		return er.getProvider(), nil
+	}
+	uid, ok := BridgeUserFromContext(ctx)
+	if !ok || uid == "" {
+		return nil, fmt.Errorf("multi-tenant bridge user context missing")
+	}
+	return er.getProviderForUser(ctx, uid)
+}
+
+func (er *EventRouter) resolveLoginEventBridgeUser(ctx context.Context) (string, error) {
+	if er.multiTenant {
+		uid, ok := BridgeUserFromContext(ctx)
+		if !ok || uid == "" {
+			return "", fmt.Errorf("multi-tenant login event missing bridge user context")
+		}
+		return uid, nil
+	}
+
+	bridgeUser, err := er.findBridgeUser(ctx)
+	if err != nil || bridgeUser == nil {
+		return "", err
+	}
+	return bridgeUser.MatrixUserID, nil
+}
+
+func (er *EventRouter) loginEventProviderType() string {
+	if er.multiTenant {
+		return "padpro"
+	}
+	if provider := er.getProvider(); provider != nil {
+		return provider.Name()
+	}
+	return ""
 }
 
 // getOrCreateRoom finds or creates a Matrix room for a WeChat chat.
@@ -777,7 +1104,7 @@ func (er *EventRouter) getOrCreateRoom(ctx context.Context, chatID string, isGro
 		Invite:   []string{bridgeUser},
 	}
 
-	provider := er.getProvider()
+	provider, _ := er.getProviderForUser(ctx, bridgeUser)
 	if isGroup && provider != nil {
 		groupInfo, err := provider.GetGroupInfo(ctx, chatID)
 		if err == nil && groupInfo != nil {

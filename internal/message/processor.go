@@ -435,6 +435,9 @@ func (p *Processor) matrixEmoteToWeChat(evt *bridge.MatrixEvent) (*bridge.WeChat
 // --- Helpers ---
 
 func (p *Processor) uploadMedia(ctx context.Context, msg *wechat.Message) (string, string, error) {
+	if p.matrixClient == nil {
+		return "", "", fmt.Errorf("matrix client not configured")
+	}
 	if len(msg.MediaData) == 0 {
 		return "", "", fmt.Errorf("no media data")
 	}

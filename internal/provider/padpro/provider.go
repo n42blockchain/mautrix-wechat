@@ -34,9 +34,10 @@ func init() {
 //   - channels.go:  Channels (视频号) Finder API
 //
 // WeChatPadPro deployment:
-//   Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
-//   External port: 1239
-//   Dependencies: MySQL 8.0 + Redis 6
+//
+//	Docker image: registry.cn-hangzhou.aliyuncs.com/wechatpad/wechatpadpro:v0.11
+//	External port: 1239
+//	Dependencies: MySQL 8.0 + Redis 6
 type Provider struct {
 	mu         sync.RWMutex
 	cfg        *wechat.ProviderConfig
@@ -116,37 +117,42 @@ func (p *Provider) Init(cfg *wechat.ProviderConfig, handler wechat.MessageHandle
 
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.running {
+		p.mu.Unlock()
 		return nil
 	}
+	p.stopCh = make(chan struct{})
 
 	p.log.Info("starting PadPro provider", "api_endpoint", p.cfg.APIEndpoint)
 
-	// Configure webhook callback if URL is specified
-	webhookURL := p.cfg.Extra["webhook_url"]
-	if webhookURL != "" {
-		if err := p.api.ConfigureWebhook(ctx, webhookURL); err != nil {
-			p.log.Warn("failed to configure webhook, falling back to WebSocket only", "error", err)
-		} else {
-			p.log.Info("webhook configured", "url", webhookURL)
+	if p.handler == nil {
+		p.log.Warn("message handler not configured, inbound sync disabled")
+	} else {
+		// Configure webhook callback if URL is specified
+		webhookURL := p.cfg.Extra["webhook_url"]
+		if webhookURL != "" {
+			if err := p.api.ConfigureWebhook(ctx, webhookURL); err != nil {
+				p.log.Warn("failed to configure webhook, falling back to WebSocket only", "error", err)
+			} else {
+				p.log.Info("webhook configured", "url", webhookURL)
+			}
 		}
-	}
 
-	// Start local callback server if port is specified
-	if portStr := p.cfg.Extra["callback_port"]; portStr != "" {
-		port, _ := strconv.Atoi(portStr)
-		if port > 0 {
-			p.startCallbackServer(port)
+		// Start local callback server if port is specified
+		if portStr := p.cfg.Extra["callback_port"]; portStr != "" {
+			port, _ := strconv.Atoi(portStr)
+			if port > 0 {
+				p.startCallbackServer(port)
+			}
 		}
-	}
 
-	// Start WebSocket event listener for real-time message sync
-	go p.wsEventLoop()
+		// Start WebSocket event listener for real-time message sync
+		go p.wsEventLoop()
+	}
 
 	p.running = true
 	p.log.Info("PadPro provider started")
+	p.mu.Unlock()
 	return nil
 }
 
@@ -424,9 +430,24 @@ func (p *Provider) SendVideo(ctx context.Context, toUser string, data io.Reader,
 		}
 	}
 
-	resp, err := p.api.CdnUploadVideo(ctx, &sendVideoRequest{
+	videoB64, err := EncodeMediaToBase64(data)
+	if err != nil {
+		return "", fmt.Errorf("encode video: %w", err)
+	}
+
+	req := &sendVideoRequest{
 		ToUserName: toUser,
-	})
+		VideoData:  videoB64,
+	}
+	if thumb != nil {
+		thumbB64, err := EncodeMediaToBase64(thumb)
+		if err != nil {
+			return "", fmt.Errorf("encode video thumbnail: %w", err)
+		}
+		req.ThumbData = thumbB64
+	}
+
+	resp, err := p.api.CdnUploadVideo(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("send video: %w", err)
 	}
@@ -476,8 +497,14 @@ func (p *Provider) SendFile(ctx context.Context, toUser string, data io.Reader, 
 		}
 	}
 
+	fileB64, err := EncodeMediaToBase64(data)
+	if err != nil {
+		return "", fmt.Errorf("encode file: %w", err)
+	}
+
 	resp, err := p.api.SendFile(ctx, &sendFileRequest{
 		ToUserName: toUser,
+		FileData:   fileB64,
 		FileName:   filename,
 	})
 	if err != nil {
@@ -894,4 +921,3 @@ func guessMimeType(msg *wechat.Message) string {
 		return "application/octet-stream"
 	}
 }
-

@@ -120,6 +120,21 @@ func TestCallbackHandler_TextMessage(t *testing.T) {
 	}
 }
 
+func TestCallbackHandler_WithoutHandlerReturns503(t *testing.T) {
+	ch := NewCallbackHandler(testCallbackLog, nil)
+
+	w := postCallback(ch, map[string]interface{}{
+		"type":      "message",
+		"msg_id":    "msg_001",
+		"msg_type":  float64(1),
+		"from_user": "wxid_sender",
+	})
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: %d", w.Code)
+	}
+}
+
 func TestCallbackHandler_ImageMessage(t *testing.T) {
 	h := &testHandler{}
 	ch := NewCallbackHandler(testCallbackLog, h)

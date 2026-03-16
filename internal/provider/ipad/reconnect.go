@@ -13,10 +13,11 @@ import (
 // It monitors the connection via heartbeats and triggers reconnection
 // when the connection drops.
 type Reconnector struct {
-	mu     sync.Mutex
-	log    *slog.Logger
-	state  reconnectState
-	stopCh chan struct{}
+	mu      sync.Mutex
+	log     *slog.Logger
+	state   reconnectState
+	stopCh  chan struct{}
+	running bool
 
 	// Configuration
 	heartbeatInterval time.Duration
@@ -24,21 +25,21 @@ type Reconnector struct {
 	baseBackoff       time.Duration
 
 	// Callbacks
-	checkAlive  func(ctx context.Context) bool
-	doReconnect func(ctx context.Context) error
-	onConnected func()
+	checkAlive     func(ctx context.Context) bool
+	doReconnect    func(ctx context.Context) error
+	onConnected    func()
 	onDisconnected func()
 
 	// Stats
-	reconnectCount int
-	lastConnected  time.Time
+	reconnectCount   int
+	lastConnected    time.Time
 	lastDisconnected time.Time
 }
 
 type reconnectState int
 
 const (
-	stateConnected    reconnectState = iota
+	stateConnected reconnectState = iota
 	stateDisconnected
 	stateReconnecting
 	stateStopped
@@ -89,7 +90,20 @@ func NewReconnector(cfg ReconnectorConfig) *Reconnector {
 
 // Start begins the heartbeat monitoring loop.
 func (r *Reconnector) Start() {
-	go r.heartbeatLoop()
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return
+	}
+	if r.state == stateStopped || r.stopCh == nil {
+		r.stopCh = make(chan struct{})
+		r.state = stateDisconnected
+	}
+	stopCh := r.stopCh
+	r.running = true
+	r.mu.Unlock()
+
+	go r.heartbeatLoop(stopCh)
 }
 
 // Stop stops the reconnector.
@@ -101,6 +115,7 @@ func (r *Reconnector) Stop() {
 		return
 	}
 	r.state = stateStopped
+	r.running = false
 	close(r.stopCh)
 }
 
@@ -157,22 +172,22 @@ type ReconnectStats struct {
 }
 
 // heartbeatLoop periodically checks connection health and triggers reconnection.
-func (r *Reconnector) heartbeatLoop() {
+func (r *Reconnector) heartbeatLoop(stopCh chan struct{}) {
 	ticker := time.NewTicker(r.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-r.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
-			r.checkAndReconnect()
+			r.checkAndReconnect(stopCh)
 		}
 	}
 }
 
 // checkAndReconnect checks the connection and reconnects if needed.
-func (r *Reconnector) checkAndReconnect() {
+func (r *Reconnector) checkAndReconnect(stopCh chan struct{}) {
 	r.mu.Lock()
 	state := r.state
 	r.mu.Unlock()
@@ -188,17 +203,17 @@ func (r *Reconnector) checkAndReconnect() {
 		if r.checkAlive != nil && !r.checkAlive(ctx) {
 			r.log.Warn("heartbeat check failed, connection lost")
 			r.MarkDisconnected()
-			go r.reconnectWithBackoff()
+			go r.reconnectWithBackoff(stopCh)
 		}
 		return
 	}
 
 	// stateDisconnected — attempt reconnect
-	go r.reconnectWithBackoff()
+	go r.reconnectWithBackoff(stopCh)
 }
 
 // reconnectWithBackoff attempts to reconnect with exponential backoff.
-func (r *Reconnector) reconnectWithBackoff() {
+func (r *Reconnector) reconnectWithBackoff(stopCh chan struct{}) {
 	r.mu.Lock()
 	if r.state == stateReconnecting || r.state == stateStopped {
 		r.mu.Unlock()
@@ -210,7 +225,7 @@ func (r *Reconnector) reconnectWithBackoff() {
 
 	for {
 		select {
-		case <-r.stopCh:
+		case <-stopCh:
 			return
 		default:
 		}
@@ -222,7 +237,7 @@ func (r *Reconnector) reconnectWithBackoff() {
 
 		// Wait for backoff
 		select {
-		case <-r.stopCh:
+		case <-stopCh:
 			return
 		case <-time.After(backoff):
 		}

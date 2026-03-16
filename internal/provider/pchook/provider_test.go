@@ -117,6 +117,17 @@ func TestProvider_UnsupportedSendMethods(t *testing.T) {
 	}
 }
 
+func TestProvider_LoginWithoutHandlerReturnsError(t *testing.T) {
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{RPCPort: 19088}, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if err := p.Login(context.Background()); err == nil {
+		t.Fatal("expected login error when RPC is not connected")
+	}
+}
+
 func TestProvider_DetectMimeType(t *testing.T) {
 	tests := []struct {
 		path string
