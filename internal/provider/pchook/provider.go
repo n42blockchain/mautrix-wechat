@@ -40,11 +40,20 @@ type Provider struct {
 	running    bool
 	log        *slog.Logger
 
-	rpc    *RPCClient
+	rpc    rpcClient
 	stopCh chan struct{}
 
 	// tempDir for received media files
 	tempDir string
+}
+
+type rpcClient interface {
+	Connect(ctx context.Context) error
+	Close() error
+	Ping(ctx context.Context) error
+	Call(ctx context.Context, method string, params interface{}) (json.RawMessage, error)
+	SetNotificationHandler(func(method string, params json.RawMessage))
+	IsConnected() bool
 }
 
 // --- Lifecycle ---
@@ -555,26 +564,63 @@ func (p *Provider) heartbeatLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+	p.heartbeatLoopWithTicker(ticker.C, p.stopCh)
+}
+
+func (p *Provider) heartbeatLoopWithTicker(ticks <-chan time.Time, stopCh <-chan struct{}) {
 	for {
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			return
-		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := p.rpc.Ping(ctx); err != nil {
-				p.log.Warn("heartbeat failed", "error", err)
-				p.setLoginState(wechat.LoginStateError)
-
-				// Attempt to reconnect
-				if connErr := p.rpc.Connect(ctx); connErr != nil {
-					p.log.Error("reconnect failed", "error", connErr)
-				} else {
-					p.checkLoginStatus(ctx)
-				}
-			}
-			cancel()
+		case <-ticks:
+			p.heartbeatStep(stopCh)
 		}
 	}
+}
+
+func (p *Provider) heartbeatStep(stopCh <-chan struct{}) {
+	ctx, cancel := cancellableTimeout(stopCh, 5*time.Second)
+	err := p.rpc.Ping(ctx)
+	cancel()
+	if err == nil {
+		return
+	}
+
+	p.log.Warn("heartbeat failed", "error", err)
+	p.setLoginState(wechat.LoginStateError)
+
+	select {
+	case <-stopCh:
+		return
+	default:
+	}
+
+	ctx, cancel = cancellableTimeout(stopCh, 5*time.Second)
+	connErr := p.rpc.Connect(ctx)
+	cancel()
+	if connErr != nil {
+		p.log.Error("reconnect failed", "error", connErr)
+		return
+	}
+
+	select {
+	case <-stopCh:
+		return
+	default:
+	}
+	p.checkLoginStatus(context.Background())
+}
+
+func cancellableTimeout(stopCh <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 // setLoginState updates the login state.
@@ -653,7 +699,8 @@ var _ wechat.Provider = (*Provider)(nil)
 
 // GetRPCClient returns the underlying RPC client for testing/diagnostics.
 func (p *Provider) GetRPCClient() *RPCClient {
-	return p.rpc
+	rpc, _ := p.rpc.(*RPCClient)
+	return rpc
 }
 
 // SendImageFromPath sends an image directly from a file path on the host.

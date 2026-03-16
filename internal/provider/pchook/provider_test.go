@@ -3,11 +3,54 @@ package pchook
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
 )
+
+type fakeRPCClient struct {
+	connectCalls atomic.Int32
+	pingCalls    atomic.Int32
+	callCalls    atomic.Int32
+	pingFunc     func(context.Context) error
+	connectFunc  func(context.Context) error
+	callFunc     func(context.Context, string, interface{}) (json.RawMessage, error)
+}
+
+func (f *fakeRPCClient) Connect(ctx context.Context) error {
+	f.connectCalls.Add(1)
+	if f.connectFunc != nil {
+		return f.connectFunc(ctx)
+	}
+	return nil
+}
+
+func (f *fakeRPCClient) Close() error { return nil }
+
+func (f *fakeRPCClient) Ping(ctx context.Context) error {
+	f.pingCalls.Add(1)
+	if f.pingFunc != nil {
+		return f.pingFunc(ctx)
+	}
+	return nil
+}
+
+func (f *fakeRPCClient) Call(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	f.callCalls.Add(1)
+	if f.callFunc != nil {
+		return f.callFunc(ctx, method, params)
+	}
+	return nil, nil
+}
+
+func (f *fakeRPCClient) SetNotificationHandler(func(string, json.RawMessage)) {}
+func (f *fakeRPCClient) IsConnected() bool                                    { return true }
 
 func TestProvider_Registration(t *testing.T) {
 	if !wechat.DefaultRegistry.Has("pchook") {
@@ -475,5 +518,85 @@ func TestRPCClient_HandleIncoming_Notification(t *testing.T) {
 		}
 	default:
 		// Notification handler runs in goroutine, might not be immediate
+	}
+}
+
+func TestProvider_HeartbeatStepSkipsReconnectAfterStop(t *testing.T) {
+	stopCh := make(chan struct{})
+	pingStarted := make(chan struct{})
+
+	rpc := &fakeRPCClient{
+		pingFunc: func(ctx context.Context) error {
+			close(pingStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		connectFunc: func(context.Context) error {
+			return errors.New("unexpected reconnect")
+		},
+	}
+
+	p := &Provider{
+		rpc:    rpc,
+		stopCh: stopCh,
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.heartbeatStep(stopCh)
+		close(done)
+	}()
+
+	<-pingStarted
+	close(stopCh)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeatStep timed out after stop")
+	}
+
+	if got := rpc.connectCalls.Load(); got != 0 {
+		t.Fatalf("connect calls = %d", got)
+	}
+	if p.GetLoginState() != wechat.LoginStateError {
+		t.Fatalf("login state = %v", p.GetLoginState())
+	}
+}
+
+func TestProvider_HeartbeatStepReconnectsAndRefreshesSelf(t *testing.T) {
+	stopCh := make(chan struct{})
+	rpc := &fakeRPCClient{
+		pingFunc: func(context.Context) error {
+			return errors.New("ping failed")
+		},
+		callFunc: func(_ context.Context, method string, _ interface{}) (json.RawMessage, error) {
+			if method != "get_self_info" {
+				t.Fatalf("unexpected method: %s", method)
+			}
+			return json.RawMessage(`{"wxid":"wxid_self","nickname":"Bridge Bot"}`), nil
+		},
+	}
+
+	p := &Provider{
+		rpc:    rpc,
+		stopCh: stopCh,
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	p.heartbeatStep(stopCh)
+
+	if got := rpc.connectCalls.Load(); got != 1 {
+		t.Fatalf("connect calls = %d", got)
+	}
+	if got := rpc.callCalls.Load(); got != 1 {
+		t.Fatalf("call count = %d", got)
+	}
+	if p.GetLoginState() != wechat.LoginStateLoggedIn {
+		t.Fatalf("login state = %v", p.GetLoginState())
+	}
+	if self := p.GetSelf(); self == nil || self.UserID != "wxid_self" || self.Nickname != "Bridge Bot" {
+		t.Fatalf("unexpected self: %+v", self)
 	}
 }

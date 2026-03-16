@@ -171,6 +171,8 @@
 - 2026-03-16 23: Added provider regression tests covering occupied callback ports for both `ipad` and `padpro`, then re-ran `go test ./...` and `go vet ./...` successfully.
 - 2026-03-16 23: Fixed the same callback-startup false-success issue in `wecom.CallbackServer.Start()`, which previously returned success before `ListenAndServe()` actually bound the port.
 - 2026-03-16 23: Added `wecom` provider coverage for occupied callback ports and re-ran targeted tests plus full `go test ./...` / `go vet ./...` successfully.
+- 2026-03-16 23: Refactored `pchook.Provider` heartbeat handling into testable steps and fixed the stop-time reconnect race so closing `stopCh` now cancels in-flight ping/connect attempts before they can revive the RPC connection.
+- 2026-03-16 23: Added `pchook` regression coverage for both “stop during heartbeat failure” and “heartbeat failure triggers reconnect + self refresh”, then re-ran targeted tests successfully.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 54.3%
