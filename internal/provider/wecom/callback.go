@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,6 +21,7 @@ type CallbackServer struct {
 	crypto  *CallbackCrypto
 	handler wechat.MessageHandler
 	server  *http.Server
+	ln      net.Listener
 }
 
 // NewCallbackServer creates a new WeCom callback HTTP server.
@@ -46,12 +48,19 @@ func (cs *CallbackServer) Start(port int) error {
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
+	listener, err := net.Listen("tcp", cs.server.Addr)
+	if err != nil {
+		cs.server = nil
+		return err
+	}
+	cs.ln = listener
+
 	cs.log.Info("wecom callback server starting", "port", port)
-	go func() {
-		if err := cs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	go func(server *http.Server, listener net.Listener) {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			cs.log.Error("callback server error", "error", err)
 		}
-	}()
+	}(cs.server, cs.ln)
 
 	return nil
 }
@@ -61,7 +70,10 @@ func (cs *CallbackServer) Stop() error {
 	if cs.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return cs.server.Shutdown(ctx)
+		err := cs.server.Shutdown(ctx)
+		cs.server = nil
+		cs.ln = nil
+		return err
 	}
 	return nil
 }

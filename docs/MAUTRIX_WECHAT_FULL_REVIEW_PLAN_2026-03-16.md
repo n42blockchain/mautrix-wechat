@@ -169,6 +169,8 @@
 - 2026-03-16 23: Added `ipad` regression coverage for the embedded-media-over-broken-URL path and re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully again.
 - 2026-03-16 23: Hardened `ipad` and `padpro` callback server startup to bind ports before `Start()` succeeds, so occupied webhook ports now fail fast instead of only logging from background goroutines.
 - 2026-03-16 23: Added provider regression tests covering occupied callback ports for both `ipad` and `padpro`, then re-ran `go test ./...` and `go vet ./...` successfully.
+- 2026-03-16 23: Fixed the same callback-startup false-success issue in `wecom.CallbackServer.Start()`, which previously returned success before `ListenAndServe()` actually bound the port.
+- 2026-03-16 23: Added `wecom` provider coverage for occupied callback ports and re-ran targeted tests plus full `go test ./...` / `go vet ./...` successfully.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 54.3%

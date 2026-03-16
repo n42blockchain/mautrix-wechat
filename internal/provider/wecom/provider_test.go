@@ -3,9 +3,11 @@ package wecom
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -374,6 +376,52 @@ func TestProviderStartStopAndLoginLifecycle(t *testing.T) {
 	}
 	if provider.IsRunning() {
 		t.Fatal("provider should not be running after stop")
+	}
+}
+
+func TestProviderStartFailsWhenCallbackPortIsOccupied(t *testing.T) {
+	mock := newProviderAPIMock(t)
+	defer mock.close()
+
+	occupied, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer occupied.Close()
+
+	_, port, err := net.SplitHostPort(occupied.Addr().String())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	key = key[:43]
+
+	handler := &mockHandler{}
+	provider := &Provider{}
+	if err := provider.Init(&wechat.ProviderConfig{
+		CorpID:    "test_corp",
+		AppSecret: "test_secret",
+		AgentID:   1000001,
+		Token:     "testtoken",
+		AESKey:    key,
+		Extra: map[string]string{
+			"callback_port": port,
+		},
+	}, handler); err != nil {
+		t.Fatalf("init provider: %v", err)
+	}
+
+	provider.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	provider.client.httpClient.Transport = newRewriteTransport(t, mock.server.URL)
+	provider.client.httpClient.Timeout = 5 * time.Second
+
+	err = provider.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "start callback server") {
+		t.Fatalf("start error = %v", err)
+	}
+	if provider.IsRunning() {
+		t.Fatal("provider should not be running after callback bind failure")
 	}
 }
 
