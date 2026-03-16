@@ -29,7 +29,8 @@ type Database struct {
 	NodeAssignment  *NodeAssignmentStore
 }
 
-// New creates a new Database instance and runs migrations.
+// New creates a new Database instance and initializes typed stores.
+// Call RunMigrations separately after startup wiring is complete.
 func New(driverName, dataSourceName string, maxOpen, maxIdle int) (*Database, error) {
 	db, err := sql.Open(driverName, dataSourceName)
 	if err != nil {
@@ -43,6 +44,7 @@ func New(driverName, dataSourceName string, maxOpen, maxIdle int) (*Database, er
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 

@@ -154,12 +154,15 @@
 - 2026-03-16 23: Fixed `ipad.Login()` to decode `qr_base64` into image bytes instead of passing raw base64 text through `LoginEvent.QRCode`.
 - 2026-03-16 23: Fixed `ipad` risk-control config parsing so `random_delay: "false"` no longer enables jitter merely because the key exists.
 - 2026-03-16 23: Added API-backed `ipad` coverage for login, logout, reconnect, health checks, contacts, groups, send-link/location, and risk-control stats, raising `internal/provider/ipad` coverage to `74.0%`.
+- 2026-03-16 23: Clarified `database.New()` semantics so the code and comment both reflect that migrations are run explicitly by bridge startup, not implicitly in the constructor.
+- 2026-03-16 23: Fixed `database.New()` to close the opened handle when `PingContext()` fails, avoiding a leaked connection on startup failure paths.
+- 2026-03-16 23: Added `internal/database/database_test.go` to cover constructor wiring, ping-failure cleanup, `RunMigrations()`, rollback-on-failure, `Close()`, and `DB()`, raising `internal/database` coverage to `67.9%`.
 - 2026-03-16 22: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the provider/media hardening pass.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 53.2%
 - `internal/config` 98.4%
-- `internal/database` 54.0%
+- `internal/database` 67.9%
 - `internal/message` 91.2%
 - `internal/provider/ipad` 74.0%
 - `internal/provider/padpro` 45.3%
