@@ -157,6 +157,8 @@
 - 2026-03-16 23: Clarified `database.New()` semantics so the code and comment both reflect that migrations are run explicitly by bridge startup, not implicitly in the constructor.
 - 2026-03-16 23: Fixed `database.New()` to close the opened handle when `PingContext()` fails, avoiding a leaked connection on startup failure paths.
 - 2026-03-16 23: Added `internal/database/database_test.go` to cover constructor wiring, ping-failure cleanup, `RunMigrations()`, rollback-on-failure, `Close()`, and `DB()`, raising `internal/database` coverage to `67.9%`.
+- 2026-03-16 23: Fixed `padpro.Login()` to emit `LoginStateError` events when QR-code fetch fails, so host UIs receive the same failure signal they already get from other providers.
+- 2026-03-16 23: Added `padpro` login and risk-control tests covering QR-code decode, logged-in state propagation, silence-period blocking, daily counter resets, and stats reporting, raising `internal/provider/padpro` coverage to `58.5%`.
 - 2026-03-16 22: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the provider/media hardening pass.
 
 ## Final Coverage Snapshot
@@ -165,7 +167,7 @@
 - `internal/database` 67.9%
 - `internal/message` 91.2%
 - `internal/provider/ipad` 74.0%
-- `internal/provider/padpro` 45.3%
+- `internal/provider/padpro` 58.5%
 - `internal/provider/pchook` 81.4%
 - `internal/provider/wecom` 72.5%
 - `pkg/wechat` 52.2%

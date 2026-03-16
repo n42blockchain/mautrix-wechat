@@ -234,6 +234,12 @@ func (p *Provider) Login(ctx context.Context) error {
 		p.mu.Lock()
 		p.loginState = wechat.LoginStateError
 		p.mu.Unlock()
+		if p.handler != nil {
+			p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
+				State: wechat.LoginStateError,
+				Error: fmt.Sprintf("request QR code: %v", err),
+			})
+		}
 		return fmt.Errorf("request QR code: %w", err)
 	}
 
