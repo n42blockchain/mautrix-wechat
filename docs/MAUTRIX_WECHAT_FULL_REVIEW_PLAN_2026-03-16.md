@@ -150,6 +150,7 @@
 - 2026-03-16 22: Fixed `wecom` avatar downloads to reject non-2xx HTTP responses too, so avatar fetch semantics now match `ipad` and `padpro`.
 - 2026-03-16 22: Completed `pchook` location parsing by extracting `x/y` coordinates and attribute-form `label/poiname`, then added reply-path regression tests for link and location XML parsing.
 - 2026-03-16 22: Covered `pchook` logout and group-info lifecycle paths in the RPC-backed integration suite, raising `internal/provider/pchook` coverage to `81.4%`.
+- 2026-03-16 22: Added contract tests for `padpro` Moments and Channels APIs, locking down `/sns/*` and `/finder/*` request payloads plus response-to-model conversion paths.
 - 2026-03-16 22: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the provider/media hardening pass.
 
 ## Final Coverage Snapshot
@@ -158,7 +159,7 @@
 - `internal/database` 54.0%
 - `internal/message` 91.2%
 - `internal/provider/ipad` 53.3%
-- `internal/provider/padpro` 41.0%
+- `internal/provider/padpro` 45.3%
 - `internal/provider/pchook` 81.4%
 - `internal/provider/wecom` 72.5%
 - `pkg/wechat` 52.2%
