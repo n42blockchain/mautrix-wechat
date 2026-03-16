@@ -151,6 +151,9 @@
 - 2026-03-16 22: Completed `pchook` location parsing by extracting `x/y` coordinates and attribute-form `label/poiname`, then added reply-path regression tests for link and location XML parsing.
 - 2026-03-16 22: Covered `pchook` logout and group-info lifecycle paths in the RPC-backed integration suite, raising `internal/provider/pchook` coverage to `81.4%`.
 - 2026-03-16 22: Added contract tests for `padpro` Moments and Channels APIs, locking down `/sns/*` and `/finder/*` request payloads plus response-to-model conversion paths.
+- 2026-03-16 23: Fixed `ipad.Login()` to decode `qr_base64` into image bytes instead of passing raw base64 text through `LoginEvent.QRCode`.
+- 2026-03-16 23: Fixed `ipad` risk-control config parsing so `random_delay: "false"` no longer enables jitter merely because the key exists.
+- 2026-03-16 23: Added API-backed `ipad` coverage for login, logout, reconnect, health checks, contacts, groups, send-link/location, and risk-control stats, raising `internal/provider/ipad` coverage to `74.0%`.
 - 2026-03-16 22: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the provider/media hardening pass.
 
 ## Final Coverage Snapshot
@@ -158,7 +161,7 @@
 - `internal/config` 98.4%
 - `internal/database` 54.0%
 - `internal/message` 91.2%
-- `internal/provider/ipad` 53.3%
+- `internal/provider/ipad` 74.0%
 - `internal/provider/padpro` 45.3%
 - `internal/provider/pchook` 81.4%
 - `internal/provider/wecom` 72.5%

@@ -3,11 +3,13 @@ package ipad
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -199,10 +201,17 @@ func (p *Provider) Login(ctx context.Context) error {
 	qrBase64, _ := resp["qr_base64"].(string)
 
 	if p.handler != nil {
+		var qrCode []byte
+		if qrBase64 != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(qrBase64); err == nil {
+				qrCode = decoded
+			}
+		}
+
 		p.handler.OnLoginEvent(ctx, &wechat.LoginEvent{
 			State:  wechat.LoginStateQRCode,
 			QRURL:  qrURL,
-			QRCode: []byte(qrBase64),
+			QRCode: qrCode,
 		})
 	}
 
@@ -638,8 +647,10 @@ func (p *Provider) buildRiskControlConfig() RiskControlConfig {
 		if v, ok := p.cfg.Extra["new_account_silence_days"]; ok {
 			fmt.Sscanf(v, "%d", &cfg.NewAccountSilenceDays)
 		}
-		if _, ok := p.cfg.Extra["random_delay"]; ok {
-			cfg.RandomDelay = true
+		if v, ok := p.cfg.Extra["random_delay"]; ok {
+			if parsed, err := strconv.ParseBool(v); err == nil {
+				cfg.RandomDelay = parsed
+			}
 		}
 	}
 

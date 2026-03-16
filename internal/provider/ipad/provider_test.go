@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
 )
@@ -23,6 +25,52 @@ func (errReader) Read(_ []byte) (int, error) {
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type loginCaptureHandler struct {
+	mu     sync.Mutex
+	logins []*wechat.LoginEvent
+	ch     chan *wechat.LoginEvent
+}
+
+func newLoginCaptureHandler() *loginCaptureHandler {
+	return &loginCaptureHandler{ch: make(chan *wechat.LoginEvent, 8)}
+}
+
+func (h *loginCaptureHandler) OnMessage(context.Context, *wechat.Message) error { return nil }
+func (h *loginCaptureHandler) OnContactUpdate(context.Context, *wechat.ContactInfo) error {
+	return nil
+}
+func (h *loginCaptureHandler) OnGroupMemberUpdate(context.Context, string, []*wechat.GroupMember) error {
+	return nil
+}
+func (h *loginCaptureHandler) OnPresence(context.Context, string, bool) error { return nil }
+func (h *loginCaptureHandler) OnTyping(context.Context, string, string) error { return nil }
+func (h *loginCaptureHandler) OnRevoke(context.Context, string, string) error { return nil }
+
+func (h *loginCaptureHandler) OnLoginEvent(_ context.Context, evt *wechat.LoginEvent) error {
+	copyEvt := *evt
+	h.mu.Lock()
+	h.logins = append(h.logins, &copyEvt)
+	h.mu.Unlock()
+	h.ch <- &copyEvt
+	return nil
+}
+
+func (h *loginCaptureHandler) waitForState(state wechat.LoginState, timeout time.Duration) *wechat.LoginEvent {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case evt := <-h.ch:
+			if evt.State == state {
+				return evt
+			}
+		case <-timer.C:
+			return nil
+		}
+	}
 }
 
 func TestProvider_StartRecreatesStopChannel(t *testing.T) {
@@ -70,6 +118,82 @@ func TestProvider_StartWithoutHandlerSkipsCallbackServer(t *testing.T) {
 
 	if p.callbackSrv != nil {
 		t.Fatal("callback server should stay disabled when handler is nil")
+	}
+}
+
+func TestProvider_BuildRiskControlConfig_ParsesRandomDelayBoolean(t *testing.T) {
+	p := &Provider{cfg: &wechat.ProviderConfig{Extra: map[string]string{"random_delay": "false"}}}
+	cfg := p.buildRiskControlConfig()
+	if cfg.RandomDelay {
+		t.Fatal("random_delay=false should stay disabled")
+	}
+
+	p.cfg = &wechat.ProviderConfig{Extra: map[string]string{"random_delay": "true"}}
+	cfg = p.buildRiskControlConfig()
+	if !cfg.RandomDelay {
+		t.Fatal("random_delay=true should enable random delay")
+	}
+}
+
+func TestProvider_Login_DecodesQRCodeAndCompletesLogin(t *testing.T) {
+	qrPNG := []byte("qr-png")
+	handler := newLoginCaptureHandler()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/qrcode":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"qr_url":"https://example.com/scan","qr_base64":"` + base64.StdEncoding.EncodeToString(qrPNG) + `"}`))
+		case "/login/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":2,"user_id":"wxid_self","nickname":"Bridge Bot","avatar":"https://example.com/avatar.jpg"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: server.URL,
+		Extra: map[string]string{
+			"message_interval_ms": "1",
+			"random_delay":        "false",
+		},
+	}, handler); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := p.Login(ctx); err != nil {
+		t.Fatalf("Login error: %v", err)
+	}
+
+	qrEvent := handler.waitForState(wechat.LoginStateQRCode, time.Second)
+	if qrEvent == nil {
+		t.Fatal("expected QR code login event")
+	}
+	if qrEvent.QRURL != "https://example.com/scan" {
+		t.Fatalf("QRURL = %q", qrEvent.QRURL)
+	}
+	if string(qrEvent.QRCode) != string(qrPNG) {
+		t.Fatalf("QRCode = %q", string(qrEvent.QRCode))
+	}
+
+	loggedIn := handler.waitForState(wechat.LoginStateLoggedIn, 3*time.Second)
+	if loggedIn == nil {
+		t.Fatal("expected logged-in event")
+	}
+	if loggedIn.UserID != "wxid_self" || loggedIn.Name != "Bridge Bot" {
+		t.Fatalf("unexpected logged-in event: %+v", loggedIn)
+	}
+	if p.GetLoginState() != wechat.LoginStateLoggedIn {
+		t.Fatalf("login state = %v", p.GetLoginState())
+	}
+	if self := p.GetSelf(); self == nil || self.UserID != "wxid_self" || self.Nickname != "Bridge Bot" {
+		t.Fatalf("unexpected self: %+v", self)
 	}
 }
 
@@ -299,5 +423,219 @@ func TestProvider_GetUserAvatar_RejectsHTTPError(t *testing.T) {
 
 	if _, _, err := p.GetUserAvatar(context.Background(), "wxid_avatar"); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestProvider_APIBackedOperationsAndReconnect(t *testing.T) {
+	var mu sync.Mutex
+	payloads := make(map[string][]map[string]interface{})
+	var serverURL string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/avatar.jpg" && r.Header.Get("Authorization") != "Bearer api-token" {
+			t.Fatalf("authorization header = %q", r.Header.Get("Authorization"))
+		}
+
+		if r.Method == http.MethodPost && r.URL.Path != "/avatar.jpg" {
+			defer r.Body.Close()
+			if r.ContentLength != 0 {
+				var payload map[string]interface{}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode %s payload: %v", r.URL.Path, err)
+				}
+				mu.Lock()
+				payloads[r.URL.Path] = append(payloads[r.URL.Path], payload)
+				mu.Unlock()
+			}
+		}
+
+		switch r.URL.Path {
+		case "/message/send/text", "/message/send/location", "/message/send/link":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"msg_id":"` + strings.TrimPrefix(strings.ReplaceAll(r.URL.Path, "/", "_"), "_") + `"}`))
+		case "/message/revoke", "/contact/accept", "/contact/remark", "/group/invite", "/group/remove", "/group/name", "/group/announcement", "/group/leave", "/login/logout":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case "/contact/list":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"contacts":[{"user_id":"wxid_friend","alias":"friend_alias","nickname":"Friend","remark":"Bestie","avatar_url":"https://example.com/avatar.jpg","gender":1,"province":"GD","city":"SZ","signature":"hello","is_group":false},{"user_id":"group@chatroom","nickname":"Bridge Group","is_group":true,"member_count":2}]}`))
+		case "/contact/info":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"user_id":"wxid_friend","alias":"friend_alias","nickname":"Friend","remark":"Bestie","avatar_url":"https://example.com/avatar.jpg","gender":1,"province":"GD","city":"SZ","signature":"hello","is_group":false}`))
+		case "/contact/avatar":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"avatar_url":"` + serverURL + `/avatar.jpg"}`))
+		case "/avatar.jpg":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("avatar-bytes"))
+		case "/group/list":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"contacts":[{"user_id":"group@chatroom","nickname":"Bridge Group","is_group":true,"member_count":2}]}`))
+		case "/group/members":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"members":[{"user_id":"wxid_friend","nickname":"Friend","display_name":"Friendly","avatar_url":"https://example.com/avatar.jpg","is_admin":true,"is_owner":true}]}`))
+		case "/group/info":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"user_id":"group@chatroom","nickname":"Bridge Group","is_group":true,"member_count":2}`))
+		case "/group/create":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"group_id":"group@chatroom"}`))
+		case "/login/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":3}`))
+		case "/login/reconnect":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":3,"user_id":"wxid_self","nickname":"Bridge Bot"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = server.URL
+	defer server.Close()
+
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: server.URL,
+		APIToken:    "api-token",
+		Extra: map[string]string{
+			"message_interval_ms":  "1",
+			"max_messages_per_day": "20",
+			"random_delay":         "false",
+		},
+	}, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !p.IsRunning() {
+		t.Fatal("provider should be running")
+	}
+	if p.Name() != "ipad" || p.Tier() != 2 || !p.Capabilities().SendLocation || !p.Capabilities().SendLink {
+		t.Fatalf("unexpected provider identity or capabilities")
+	}
+
+	ctx := context.Background()
+	if msgID, err := p.SendText(ctx, "wxid_friend", "hello"); err != nil || msgID != "message_send_text" {
+		t.Fatalf("SendText: %v msg=%s", err, msgID)
+	}
+	if msgID, err := p.SendLocation(ctx, "wxid_friend", &wechat.LocationInfo{
+		Latitude:  23.1291,
+		Longitude: 113.2644,
+		Label:     "Tianhe Road",
+		Poiname:   "Guangzhou",
+	}); err != nil || msgID != "message_send_location" {
+		t.Fatalf("SendLocation: %v msg=%s", err, msgID)
+	}
+	if msgID, err := p.SendLink(ctx, "wxid_friend", &wechat.LinkCardInfo{
+		Title:       "N42",
+		Description: "Bridge update",
+		URL:         "https://example.com",
+		ThumbURL:    "https://example.com/thumb.jpg",
+	}); err != nil || msgID != "message_send_link" {
+		t.Fatalf("SendLink: %v msg=%s", err, msgID)
+	}
+	if err := p.RevokeMessage(ctx, "message_send_text", "wxid_friend"); err != nil {
+		t.Fatalf("RevokeMessage: %v", err)
+	}
+
+	contacts, err := p.GetContactList(ctx)
+	if err != nil || len(contacts) != 2 {
+		t.Fatalf("GetContactList: %v len=%d", err, len(contacts))
+	}
+	contact, err := p.GetContactInfo(ctx, "wxid_friend")
+	if err != nil || contact == nil || contact.UserID != "wxid_friend" || contact.Remark != "Bestie" {
+		t.Fatalf("GetContactInfo: %v %+v", err, contact)
+	}
+	avatar, mimeType, err := p.GetUserAvatar(ctx, "wxid_friend")
+	if err != nil || string(avatar) != "avatar-bytes" || mimeType != "image/png" {
+		t.Fatalf("GetUserAvatar: %v %q %s", err, string(avatar), mimeType)
+	}
+	if err := p.AcceptFriendRequest(ctx, "<xml/>"); err != nil {
+		t.Fatalf("AcceptFriendRequest: %v", err)
+	}
+	if err := p.SetContactRemark(ctx, "wxid_friend", "Buddy"); err != nil {
+		t.Fatalf("SetContactRemark: %v", err)
+	}
+
+	groups, err := p.GetGroupList(ctx)
+	if err != nil || len(groups) != 1 || !groups[0].IsGroup {
+		t.Fatalf("GetGroupList: %v %+v", err, groups)
+	}
+	members, err := p.GetGroupMembers(ctx, "group@chatroom")
+	if err != nil || len(members) != 1 || !members[0].IsAdmin || !members[0].IsOwner {
+		t.Fatalf("GetGroupMembers: %v %+v", err, members)
+	}
+	groupInfo, err := p.GetGroupInfo(ctx, "group@chatroom")
+	if err != nil || groupInfo == nil || !groupInfo.IsGroup || groupInfo.MemberCount != 2 {
+		t.Fatalf("GetGroupInfo: %v %+v", err, groupInfo)
+	}
+	groupID, err := p.CreateGroup(ctx, "Bridge Group", []string{"wxid_friend"})
+	if err != nil || groupID != "group@chatroom" {
+		t.Fatalf("CreateGroup: %v group=%s", err, groupID)
+	}
+	if err := p.InviteToGroup(ctx, groupID, []string{"wxid_friend"}); err != nil {
+		t.Fatalf("InviteToGroup: %v", err)
+	}
+	if err := p.RemoveFromGroup(ctx, groupID, []string{"wxid_friend"}); err != nil {
+		t.Fatalf("RemoveFromGroup: %v", err)
+	}
+	if err := p.SetGroupName(ctx, groupID, "Renamed"); err != nil {
+		t.Fatalf("SetGroupName: %v", err)
+	}
+	if err := p.SetGroupAnnouncement(ctx, groupID, "hello team"); err != nil {
+		t.Fatalf("SetGroupAnnouncement: %v", err)
+	}
+	if err := p.LeaveGroup(ctx, groupID); err != nil {
+		t.Fatalf("LeaveGroup: %v", err)
+	}
+
+	p.setLoginState(wechat.LoginStateLoggedIn)
+	if !p.checkAlive(ctx) {
+		t.Fatal("checkAlive should report logged-in status")
+	}
+	p.self = nil
+	if err := p.doReconnect(ctx); err != nil {
+		t.Fatalf("doReconnect: %v", err)
+	}
+	if p.GetLoginState() != wechat.LoginStateLoggedIn {
+		t.Fatalf("login state after reconnect = %v", p.GetLoginState())
+	}
+	if self := p.GetSelf(); self == nil || self.UserID != "wxid_self" || self.Nickname != "Bridge Bot" {
+		t.Fatalf("unexpected self after reconnect: %+v", self)
+	}
+
+	messages, groupOps, friendOps := p.GetRiskControlStats()
+	if messages != 3 || groupOps != 2 || friendOps != 1 {
+		t.Fatalf("unexpected risk stats: messages=%d groups=%d friends=%d", messages, groupOps, friendOps)
+	}
+	if stats := p.GetReconnectStats(); stats.ReconnectCount != 0 {
+		t.Fatalf("unexpected reconnect stats: %+v", stats)
+	}
+
+	if err := p.Logout(ctx); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if p.GetLoginState() != wechat.LoginStateLoggedOut || p.GetSelf() != nil {
+		t.Fatalf("unexpected logout state: state=%v self=%+v", p.GetLoginState(), p.GetSelf())
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if p.IsRunning() {
+		t.Fatal("provider should be stopped")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := payloads["/message/send/location"][0]["label"]; got != "Tianhe Road" {
+		t.Fatalf("location label payload = %v", got)
+	}
+	if got := payloads["/message/send/link"][0]["thumb_url"]; got != "https://example.com/thumb.jpg" {
+		t.Fatalf("link thumb_url payload = %v", got)
+	}
+	if got := payloads["/group/create"][0]["name"]; got != "Bridge Group" {
+		t.Fatalf("group create payload = %v", got)
 	}
 }
