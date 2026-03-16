@@ -207,7 +207,8 @@ func (p *Provider) Login(ctx context.Context) error {
 	}
 
 	// Poll for login status
-	go p.pollLoginStatus(ctx)
+	stopCh := p.stopCh
+	go p.pollLoginStatus(ctx, stopCh)
 
 	return nil
 }
@@ -736,7 +737,7 @@ func (p *Provider) apiCall(ctx context.Context, path string, payload map[string]
 }
 
 // pollLoginStatus polls the GeWeChat API for login status changes.
-func (p *Provider) pollLoginStatus(ctx context.Context) {
+func (p *Provider) pollLoginStatus(ctx context.Context, stopCh chan struct{}) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -744,7 +745,7 @@ func (p *Provider) pollLoginStatus(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-p.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			state := p.GetLoginState()

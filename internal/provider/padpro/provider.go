@@ -147,7 +147,8 @@ func (p *Provider) Start(ctx context.Context) error {
 		}
 
 		// Start WebSocket event listener for real-time message sync
-		go p.wsEventLoop()
+		stopCh := p.stopCh
+		go p.wsEventLoop(stopCh)
 	}
 
 	p.running = true
@@ -251,13 +252,14 @@ func (p *Provider) Login(ctx context.Context) error {
 	}
 
 	// Start polling login status in background
-	go p.pollLoginStatus(ctx)
+	stopCh := p.stopCh
+	go p.pollLoginStatus(ctx, stopCh)
 
 	return nil
 }
 
 // pollLoginStatus polls WeChatPadPro for QR code scan and login confirmation.
-func (p *Provider) pollLoginStatus(ctx context.Context) {
+func (p *Provider) pollLoginStatus(ctx context.Context, stopCh chan struct{}) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -265,7 +267,7 @@ func (p *Provider) pollLoginStatus(ctx context.Context) {
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			return
 		case <-timeout:
 			p.mu.Lock()
@@ -832,7 +834,7 @@ func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.R
 
 // wsEventLoop connects to the WeChatPadPro WebSocket and dispatches events.
 // Automatically reconnects on connection loss with exponential backoff.
-func (p *Provider) wsEventLoop() {
+func (p *Provider) wsEventLoop(stopCh chan struct{}) {
 	p.log.Info("WebSocket event loop started")
 
 	backoff := time.Second
@@ -840,18 +842,18 @@ func (p *Provider) wsEventLoop() {
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			p.log.Info("WebSocket event loop stopped")
 			return
 		default:
 		}
 
-		if err := p.ws.connect(p.stopCh); err != nil {
+		if err := p.ws.connect(stopCh); err != nil {
 			p.log.Error("WebSocket connection error, reconnecting",
 				"error", err, "backoff", backoff)
 
 			select {
-			case <-p.stopCh:
+			case <-stopCh:
 				return
 			case <-time.After(backoff):
 			}

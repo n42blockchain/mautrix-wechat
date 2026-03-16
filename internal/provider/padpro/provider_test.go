@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
 )
@@ -109,6 +110,38 @@ func TestProvider_StartRecreatesStopChannel(t *testing.T) {
 	case <-p.stopCh:
 		t.Fatal("stop channel should be recreated on restart")
 	default:
+	}
+}
+
+func TestProvider_StartRecreatesStopChannel_WithInboundLoop(t *testing.T) {
+	p := &Provider{}
+
+	err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: "http://127.0.0.1:1",
+		APIToken:    "token",
+		Extra:       map[string]string{},
+	}, &testHandler{})
+	if err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	oldStopCh := p.stopCh
+
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	defer p.Stop()
+
+	if p.stopCh == oldStopCh {
+		t.Fatal("stop channel should be recreated on restart")
 	}
 }
 

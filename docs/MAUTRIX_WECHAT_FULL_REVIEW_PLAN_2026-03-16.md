@@ -144,7 +144,8 @@
 - 2026-03-16 21: Fixed `ipad` video send to surface thumbnail read failures instead of silently dropping the thumbnail, and added send-path regression coverage for image/file/voice payloads.
 - 2026-03-16 21: Fixed `ipad` reconnector restart/race behavior by binding heartbeat/reconnect goroutines to the start-time stop channel, so provider restarts no longer race on `stopCh`.
 - 2026-03-16 21: Fixed `ipad` media download handling to reject non-2xx HTTP responses and fall back to `application/octet-stream` when the server omits `Content-Type`.
-- 2026-03-16 21: Raised targeted provider coverage to `internal/provider/ipad 52.3%` and `internal/provider/padpro 36.6%`, then re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully.
+- 2026-03-16 21: Fixed `padpro` WebSocket/login goroutines and `ipad` login polling to bind to the start-time stop channel, avoiding restart-time races on shared `stopCh` state.
+- 2026-03-16 21: Raised targeted provider coverage to `internal/provider/ipad 52.3%` and `internal/provider/padpro 39.0%`, then re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 53.2%
@@ -152,7 +153,7 @@
 - `internal/database` 54.0%
 - `internal/message` 91.2%
 - `internal/provider/ipad` 52.3%
-- `internal/provider/padpro` 36.6%
+- `internal/provider/padpro` 39.0%
 - `internal/provider/pchook` 79.5%
 - `internal/provider/wecom` 72.5%
 - `pkg/wechat` 52.2%
