@@ -1,6 +1,7 @@
 package padpro
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -655,6 +656,10 @@ func (p *Provider) GetUserAvatar(ctx context.Context, userID string) ([]byte, st
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, "", fmt.Errorf("download avatar HTTP %d", resp.StatusCode)
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("read avatar data: %w", err)
@@ -802,6 +807,10 @@ func (p *Provider) LeaveGroup(ctx context.Context, groupID string) error {
 // DownloadMedia downloads media from a message.
 // For WeChatPadPro, media URLs are typically CDN URLs that can be fetched directly.
 func (p *Provider) DownloadMedia(ctx context.Context, msg *wechat.Message) (io.ReadCloser, string, error) {
+	if len(msg.MediaData) > 0 {
+		return io.NopCloser(bytes.NewReader(msg.MediaData)), guessMimeType(msg), nil
+	}
+
 	if msg.MediaURL == "" {
 		return nil, "", fmt.Errorf("no media URL in message")
 	}

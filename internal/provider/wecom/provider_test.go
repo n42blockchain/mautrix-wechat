@@ -142,13 +142,18 @@ func newProviderAPIMock(t *testing.T) *providerAPIMock {
 			return
 		}
 
+		avatarURL := "https://example.com/avatar.jpg"
+		if userID == "avatar_404" {
+			avatarURL = "https://example.com/avatar_missing.jpg"
+		}
+
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"errcode": 0,
 			"errmsg":  "ok",
 			"userid":  userID,
 			"name":    "User " + userID,
 			"gender":  "1",
-			"avatar":  "https://example.com/avatar.jpg",
+			"avatar":  avatarURL,
 			"alias":   "alias_" + userID,
 		})
 	})
@@ -282,6 +287,10 @@ func newProviderAPIMock(t *testing.T) *providerAPIMock {
 
 	mux.HandleFunc("/avatar.jpg", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("avatar-bytes"))
+	})
+
+	mux.HandleFunc("/avatar_missing.jpg", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
 	})
 
 	mock.server = httptest.NewServer(mux)
@@ -476,6 +485,18 @@ func TestProviderContactAndGroupOperations(t *testing.T) {
 	}
 	if len(mock.sendRequests) == 0 || mock.sendRequests[len(mock.sendRequests)-1].Text.Content != "[Announcement] hello team" {
 		t.Fatalf("unexpected send requests: %+v", mock.sendRequests)
+	}
+}
+
+func TestProviderGetUserAvatarRejectsHTTPError(t *testing.T) {
+	mock := newProviderAPIMock(t)
+	defer mock.close()
+
+	provider, _ := newMockProvider(t, mock)
+	ctx := context.Background()
+
+	if _, _, err := provider.GetUserAvatar(ctx, "avatar_404"); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

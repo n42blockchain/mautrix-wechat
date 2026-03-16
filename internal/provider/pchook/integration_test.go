@@ -343,6 +343,10 @@ func TestProviderRPCBackedLifecycleAndOperations(t *testing.T) {
 	if err != nil || len(members) != 1 || members[0].UserID != "wxid_friend" {
 		t.Fatalf("group members: %v %+v", err, members)
 	}
+	groupInfo, err := p.GetGroupInfo(ctx, "group@chatroom")
+	if err != nil || groupInfo == nil || groupInfo.UserID != "wxid_friend" {
+		t.Fatalf("group info: %v %+v", err, groupInfo)
+	}
 	groupID, err := p.CreateGroup(ctx, "New Group", []string{"wxid_friend"})
 	if err != nil || groupID != "group@chatroom" {
 		t.Fatalf("create group: %v group=%s", err, groupID)
@@ -395,6 +399,13 @@ func TestProviderRPCBackedLifecycleAndOperations(t *testing.T) {
 		if !server.sawCall(method) {
 			t.Fatalf("expected RPC method %q to be called", method)
 		}
+	}
+
+	if err := p.Logout(ctx); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if p.GetLoginState() != wechat.LoginStateLoggedOut {
+		t.Fatalf("login state after logout: %v", p.GetLoginState())
 	}
 }
 

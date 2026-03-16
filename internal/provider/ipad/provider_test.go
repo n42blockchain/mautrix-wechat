@@ -272,3 +272,32 @@ func TestProvider_DownloadMedia_UsesEmbeddedBytes(t *testing.T) {
 		t.Fatalf("unexpected embedded media: %q %s", string(data), mimeType)
 	}
 }
+
+func TestProvider_GetUserAvatar_RejectsHTTPError(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/contact/avatar":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"avatar_url":"` + serverURL + `/avatar/missing"}`))
+		case "/avatar/missing":
+			http.Error(w, "missing", http.StatusNotFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = server.URL
+	defer server.Close()
+
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: server.URL,
+		Extra:       map[string]string{},
+	}, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if _, _, err := p.GetUserAvatar(context.Background(), "wxid_avatar"); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("error = %v", err)
+	}
+}

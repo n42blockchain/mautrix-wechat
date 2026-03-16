@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -253,5 +254,63 @@ func TestProvider_SendFile_EncodesData(t *testing.T) {
 	}
 	if msgID != "13" {
 		t.Fatalf("msgID = %s", msgID)
+	}
+}
+
+func TestProvider_DownloadMedia_UsesEmbeddedBytes(t *testing.T) {
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: "http://127.0.0.1:1",
+		APIToken:    "token",
+		Extra:       map[string]string{},
+	}, nil); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	reader, mimeType, err := p.DownloadMedia(context.Background(), &wechat.Message{
+		Type:      wechat.MsgVideo,
+		MediaData: []byte("embedded-video"),
+	})
+	if err != nil {
+		t.Fatalf("DownloadMedia error: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read media: %v", err)
+	}
+	_ = reader.Close()
+
+	if string(data) != "embedded-video" || mimeType != "video/mp4" {
+		t.Fatalf("unexpected embedded media: %q %s", string(data), mimeType)
+	}
+}
+
+func TestProvider_GetUserAvatar_RejectsHTTPError(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/friend/GetContactDetailsList":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"contacts":[{"user_name":{"str":"wxid_avatar"},"nick_name":{"str":"Avatar"},"remark":{"str":""},"head_img_url":"` + serverURL + `/avatar/missing"}]}}`))
+		case "/avatar/missing":
+			http.Error(w, "missing", http.StatusNotFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = server.URL
+	defer server.Close()
+
+	p := &Provider{}
+	if err := p.Init(&wechat.ProviderConfig{
+		APIEndpoint: server.URL,
+		APIToken:    "token",
+		Extra:       map[string]string{},
+	}, nil); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	if _, _, err := p.GetUserAvatar(context.Background(), "wxid_avatar"); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("error = %v", err)
 	}
 }

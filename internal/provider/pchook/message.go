@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
@@ -97,11 +98,39 @@ func parseXMLLocation(xml string, msg *wechat.Message) {
 	if xml == "" {
 		return
 	}
-	msg.Location = &wechat.LocationInfo{
-		Label:   extractXMLField(xml, "label"),
-		Poiname: extractXMLField(xml, "poiname"),
+
+	label := extractXMLField(xml, "label")
+	if label == "" {
+		label = extractXMLAttr(xml, "label")
 	}
-	// Latitude/longitude would need float parsing from XML attrs
+	poiname := extractXMLField(xml, "poiname")
+	if poiname == "" {
+		poiname = extractXMLAttr(xml, "poiname")
+	}
+	msg.Location = &wechat.LocationInfo{
+		Label:   label,
+		Poiname: poiname,
+	}
+
+	if latitude := extractXMLAttr(xml, "x"); latitude != "" {
+		if parsed, err := strconv.ParseFloat(latitude, 64); err == nil {
+			msg.Location.Latitude = parsed
+		}
+	} else if latitude := extractXMLAttr(xml, "latitude"); latitude != "" {
+		if parsed, err := strconv.ParseFloat(latitude, 64); err == nil {
+			msg.Location.Latitude = parsed
+		}
+	}
+
+	if longitude := extractXMLAttr(xml, "y"); longitude != "" {
+		if parsed, err := strconv.ParseFloat(longitude, 64); err == nil {
+			msg.Location.Longitude = parsed
+		}
+	} else if longitude := extractXMLAttr(xml, "longitude"); longitude != "" {
+		if parsed, err := strconv.ParseFloat(longitude, 64); err == nil {
+			msg.Location.Longitude = parsed
+		}
+	}
 }
 
 // extractXMLField performs simple XML field extraction for common patterns.
@@ -146,6 +175,24 @@ func extractXMLCData(xml, field string) string {
 		return ""
 	}
 	return xml[start : start+end]
+}
+
+func extractXMLAttr(xml, attr string) string {
+	for _, quote := range []string{`"`, `'`} {
+		pattern := attr + "=" + quote
+		start := strings.Index(xml, pattern)
+		if start < 0 {
+			continue
+		}
+		start += len(pattern)
+		end := strings.Index(xml[start:], quote)
+		if end < 0 {
+			return ""
+		}
+		return xml[start : start+end]
+	}
+
+	return ""
 }
 
 // sendTextParams holds parameters for sending a text message via RPC.

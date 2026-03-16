@@ -245,6 +245,53 @@ func TestParseRawMessage_WithMediaPath(t *testing.T) {
 	}
 }
 
+func TestParseRawMessage_WithLinkXML(t *testing.T) {
+	raw := rawMessage{
+		MsgID:   "msg004",
+		Type:    int(wechat.MsgLink),
+		Sender:  "wxid_sender",
+		Content: "shared link",
+		XML:     `<msg><title><![CDATA[Test Title]]></title><des><![CDATA[Test Description]]></des><url>https://example.com</url><thumburl>https://example.com/cover.jpg</thumburl></msg>`,
+	}
+
+	data, _ := json.Marshal(raw)
+	msg, err := parseRawMessage(data, nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if msg.LinkInfo == nil {
+		t.Fatal("link info should be parsed")
+	}
+	if msg.LinkInfo.Title != "Test Title" || msg.LinkInfo.Description != "Test Description" || msg.LinkInfo.URL != "https://example.com" || msg.LinkInfo.ThumbURL != "https://example.com/cover.jpg" {
+		t.Fatalf("unexpected link info: %+v", msg.LinkInfo)
+	}
+}
+
+func TestParseRawMessage_WithLocationXML(t *testing.T) {
+	raw := rawMessage{
+		MsgID:   "msg005",
+		Type:    int(wechat.MsgLocation),
+		Sender:  "wxid_sender",
+		Content: "shared location",
+		XML:     `<msg><location x="23.1291" y="113.2644" scale="15" label="Tianhe Road" poiname="Guangzhou"/></msg>`,
+	}
+
+	data, _ := json.Marshal(raw)
+	msg, err := parseRawMessage(data, nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if msg.Location == nil {
+		t.Fatal("location should be parsed")
+	}
+	if msg.Location.Label != "Tianhe Road" || msg.Location.Poiname != "Guangzhou" {
+		t.Fatalf("unexpected location labels: %+v", msg.Location)
+	}
+	if msg.Location.Latitude != 23.1291 || msg.Location.Longitude != 113.2644 {
+		t.Fatalf("unexpected coordinates: %+v", msg.Location)
+	}
+}
+
 func TestExtractXMLField(t *testing.T) {
 	xml := `<msg><title>Test Title</title><des><![CDATA[Test Description]]></des><url>https://example.com</url></msg>`
 
@@ -280,6 +327,20 @@ func TestExtractXMLCData(t *testing.T) {
 	result = extractXMLCData(xml, "missing")
 	if result != "" {
 		t.Errorf("missing should be empty: %q", result)
+	}
+}
+
+func TestExtractXMLAttr(t *testing.T) {
+	xml := `<location x="23.1291" y='113.2644' label="Tianhe Road"/>`
+
+	if got := extractXMLAttr(xml, "x"); got != "23.1291" {
+		t.Fatalf("x attr: %q", got)
+	}
+	if got := extractXMLAttr(xml, "y"); got != "113.2644" {
+		t.Fatalf("y attr: %q", got)
+	}
+	if got := extractXMLAttr(xml, "missing"); got != "" {
+		t.Fatalf("missing attr: %q", got)
 	}
 }
 

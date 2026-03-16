@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
@@ -37,18 +38,18 @@ type userInfoResponse struct {
 }
 
 type userInfo struct {
-	UserID     string `json:"userid"`
-	Name       string `json:"name"`
-	Department []int  `json:"department"`
-	Position   string `json:"position"`
-	Mobile     string `json:"mobile"`
-	Gender     string `json:"gender"`
-	Email      string `json:"email"`
-	Avatar     string `json:"avatar"`
+	UserID      string `json:"userid"`
+	Name        string `json:"name"`
+	Department  []int  `json:"department"`
+	Position    string `json:"position"`
+	Mobile      string `json:"mobile"`
+	Gender      string `json:"gender"`
+	Email       string `json:"email"`
+	Avatar      string `json:"avatar"`
 	ThumbAvatar string `json:"thumb_avatar"`
-	Status     int    `json:"status"`
-	Alias      string `json:"alias"`
-	Address    string `json:"address"`
+	Status      int    `json:"status"`
+	Alias       string `json:"alias"`
+	Address     string `json:"address"`
 }
 
 // externalContactListResponse from /cgi-bin/externalcontact/list.
@@ -210,6 +211,10 @@ func (p *Provider) GetUserAvatar(ctx context.Context, userID string) ([]byte, st
 		return nil, "", fmt.Errorf("download avatar: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, "", fmt.Errorf("download avatar HTTP %d", resp.StatusCode)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

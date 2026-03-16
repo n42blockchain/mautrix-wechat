@@ -443,6 +443,10 @@ func (p *Provider) GetUserAvatar(ctx context.Context, userID string) ([]byte, st
 	}
 	defer httpResp.Body.Close()
 
+	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		return nil, "", fmt.Errorf("download avatar HTTP %d", httpResp.StatusCode)
+	}
+
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("read avatar: %w", err)

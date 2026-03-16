@@ -145,16 +145,21 @@
 - 2026-03-16 21: Fixed `ipad` reconnector restart/race behavior by binding heartbeat/reconnect goroutines to the start-time stop channel, so provider restarts no longer race on `stopCh`.
 - 2026-03-16 21: Fixed `ipad` media download handling to reject non-2xx HTTP responses and fall back to `application/octet-stream` when the server omits `Content-Type`.
 - 2026-03-16 21: Fixed `padpro` WebSocket/login goroutines and `ipad` login polling to bind to the start-time stop channel, avoiding restart-time races on shared `stopCh` state.
-- 2026-03-16 21: Raised targeted provider coverage to `internal/provider/ipad 52.3%` and `internal/provider/padpro 39.0%`, then re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully.
+- 2026-03-16 22: Fixed `ipad` and `padpro` avatar downloads to reject non-2xx HTTP responses instead of accepting error pages as image payloads.
+- 2026-03-16 22: Taught `padpro.DownloadMedia()` to reuse embedded `MediaData` before attempting a CDN fetch, reducing failures when upstream media URLs are missing or expired.
+- 2026-03-16 22: Fixed `wecom` avatar downloads to reject non-2xx HTTP responses too, so avatar fetch semantics now match `ipad` and `padpro`.
+- 2026-03-16 22: Completed `pchook` location parsing by extracting `x/y` coordinates and attribute-form `label/poiname`, then added reply-path regression tests for link and location XML parsing.
+- 2026-03-16 22: Covered `pchook` logout and group-info lifecycle paths in the RPC-backed integration suite, raising `internal/provider/pchook` coverage to `81.4%`.
+- 2026-03-16 22: Re-ran `go test ./...`, `go test -cover ./...`, `go test -race ./...`, and `go vet ./...` successfully after the provider/media hardening pass.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 53.2%
 - `internal/config` 98.4%
 - `internal/database` 54.0%
 - `internal/message` 91.2%
-- `internal/provider/ipad` 52.3%
-- `internal/provider/padpro` 39.0%
-- `internal/provider/pchook` 79.5%
+- `internal/provider/ipad` 53.3%
+- `internal/provider/padpro` 41.0%
+- `internal/provider/pchook` 81.4%
 - `internal/provider/wecom` 72.5%
 - `pkg/wechat` 52.2%
 
