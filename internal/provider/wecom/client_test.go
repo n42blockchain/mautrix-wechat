@@ -4,15 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/n42/mautrix-wechat/pkg/wechat"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // newTestServer creates a mock WeCom API server for testing.
 func newTestServer(t *testing.T) (*httptest.Server, *mockState) {
@@ -249,6 +258,54 @@ func TestFormatMsgID(t *testing.T) {
 	}
 }
 
+func TestClientDownloadMedia_UsesStatusAndMimeFallback(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	c := NewClient("corp123", "secret456", 1000001, log)
+	c.accessToken = "token_1"
+	c.tokenExpiry = farFuture()
+	c.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Query().Get("media_id") {
+			case "headerless":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("media-bytes")),
+				}, nil
+			case "missing":
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     http.Header{"Content-Type": []string{"text/html"}},
+					Body:       io.NopCloser(strings.NewReader("missing")),
+				}, nil
+			default:
+				return nil, fmt.Errorf("unexpected media_id")
+			}
+		}),
+	}
+
+	reader, mimeType, err := c.DownloadMedia(context.Background(), "headerless")
+	if err != nil {
+		t.Fatalf("DownloadMedia error: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read media: %v", err)
+	}
+	_ = reader.Close()
+	if string(data) != "media-bytes" || mimeType != "application/octet-stream" {
+		t.Fatalf("unexpected media: %q %s", string(data), mimeType)
+	}
+
+	if _, _, err := c.DownloadMedia(context.Background(), "missing"); err == nil || err.Error() != "download media HTTP 404" {
+		t.Fatalf("expected HTTP error, got %v", err)
+	}
+}
+
+func farFuture() time.Time {
+	return time.Now().Add(time.Hour)
+}
+
 // TestProviderIntegration tests the full provider lifecycle with a mock server.
 func TestProviderIntegration(t *testing.T) {
 	server, _ := newTestServer(t)
@@ -307,9 +364,9 @@ func TestProviderInitMissingCredentials(t *testing.T) {
 
 // mockHandler is a test double for wechat.MessageHandler.
 type mockHandler struct {
-	messages  []*wechat.Message
-	logins    []*wechat.LoginEvent
-	contacts  []*wechat.ContactInfo
+	messages []*wechat.Message
+	logins   []*wechat.LoginEvent
+	contacts []*wechat.ContactInfo
 }
 
 func (m *mockHandler) OnMessage(ctx context.Context, msg *wechat.Message) error {

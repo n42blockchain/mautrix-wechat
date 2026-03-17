@@ -173,6 +173,9 @@
 - 2026-03-16 23: Added `wecom` provider coverage for occupied callback ports and re-ran targeted tests plus full `go test ./...` / `go vet ./...` successfully.
 - 2026-03-16 23: Refactored `pchook.Provider` heartbeat handling into testable steps and fixed the stop-time reconnect race so closing `stopCh` now cancels in-flight ping/connect attempts before they can revive the RPC connection.
 - 2026-03-16 23: Added `pchook` regression coverage for both “stop during heartbeat failure” and “heartbeat failure triggers reconnect + self refresh”, then re-ran targeted tests successfully.
+- 2026-03-16 23: Fixed `wecom.Client.DownloadMedia()` to reject non-2xx responses before interpreting body content, and to fall back to `application/octet-stream` when successful responses omit `Content-Type`.
+- 2026-03-16 23: Fixed `pchook.GetUserAvatar()` to infer MIME type from the returned file path instead of hardcoding `image/jpeg`, so PNG avatars now round-trip with the correct content type.
+- 2026-03-16 23: Added `wecom` and `pchook` regression coverage for the media-status/headerless path and avatar MIME detection, then re-ran `go test ./...` and `go vet ./...` successfully.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 54.3%

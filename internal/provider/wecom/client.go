@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	baseURL            = "https://qyapi.weixin.qq.com"
-	tokenExpireBuffer  = 300 // refresh 5 minutes before actual expiry
-	maxRetries         = 2
+	baseURL             = "https://qyapi.weixin.qq.com"
+	tokenExpireBuffer   = 300 // refresh 5 minutes before actual expiry
+	maxRetries          = 2
 	errCodeTokenExpired = 42001
 	errCodeTokenInvalid = 40014
 )
@@ -186,12 +186,21 @@ func (c *Client) DownloadMedia(ctx context.Context, mediaID string) (io.ReadClos
 
 	contentType := resp.Header.Get("Content-Type")
 
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		defer resp.Body.Close()
+		return nil, "", fmt.Errorf("download media HTTP %d", resp.StatusCode)
+	}
+
 	// If response is JSON, it's an error
 	if contentType == "application/json" || contentType == "text/plain" {
 		defer resp.Body.Close()
 		var apiResp APIResponse
 		json.NewDecoder(resp.Body).Decode(&apiResp)
 		return nil, "", fmt.Errorf("download media failed: [%d] %s", apiResp.ErrCode, apiResp.ErrMsg)
+	}
+
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
 
 	return resp.Body, contentType, nil

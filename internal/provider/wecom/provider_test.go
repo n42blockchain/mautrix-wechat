@@ -282,7 +282,11 @@ func newProviderAPIMock(t *testing.T) *providerAPIMock {
 			})
 			return
 		}
-
+		if mediaID == "html_404" {
+			w.Header().Set("Content-Type", "text/html")
+			http.Error(w, "missing", http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte("media:" + mediaID))
 	})
@@ -629,6 +633,11 @@ func TestProviderMessageAndMediaOperations(t *testing.T) {
 		Extra: map[string]string{"media_id": "bad_media"},
 	}); err == nil {
 		t.Fatal("expected media download error")
+	}
+	if _, _, err := provider.DownloadMedia(ctx, &wechat.Message{
+		Extra: map[string]string{"media_id": "html_404"},
+	}); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("expected HTTP status media download error, got %v", err)
 	}
 
 	mock.mu.Lock()

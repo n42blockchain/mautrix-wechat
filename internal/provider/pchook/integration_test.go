@@ -229,7 +229,7 @@ func (h *recordingHandler) OnRevoke(ctx context.Context, msgID string, replaceTi
 
 func TestProviderRPCBackedLifecycleAndOperations(t *testing.T) {
 	tempDir := t.TempDir()
-	avatarPath := filepath.Join(tempDir, "avatar.jpg")
+	avatarPath := filepath.Join(tempDir, "avatar.png")
 	downloadPath := filepath.Join(tempDir, "download.png")
 	directMediaPath := filepath.Join(tempDir, "direct.jpg")
 
@@ -335,7 +335,7 @@ func TestProviderRPCBackedLifecycleAndOperations(t *testing.T) {
 	}
 
 	avatarData, avatarMime, err := p.GetUserAvatar(ctx, "wxid_friend")
-	if err != nil || string(avatarData) != "avatar" || avatarMime != "image/jpeg" {
+	if err != nil || string(avatarData) != "avatar" || avatarMime != "image/png" {
 		t.Fatalf("avatar: %v data=%q mime=%s", err, string(avatarData), avatarMime)
 	}
 

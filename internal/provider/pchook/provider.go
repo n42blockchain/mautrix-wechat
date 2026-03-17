@@ -349,7 +349,7 @@ func (p *Provider) GetUserAvatar(ctx context.Context, userID string) ([]byte, st
 		return nil, "", fmt.Errorf("read avatar file: %w", err)
 	}
 
-	return data, "image/jpeg", nil
+	return data, detectMimeType(avatarPath), nil
 }
 
 func (p *Provider) AcceptFriendRequest(ctx context.Context, xml string) error {
