@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -192,7 +193,7 @@ func (c *Client) DownloadMedia(ctx context.Context, mediaID string) (io.ReadClos
 	}
 
 	// If response is JSON, it's an error
-	if contentType == "application/json" || contentType == "text/plain" {
+	if strings.HasPrefix(contentType, "application/json") || strings.HasPrefix(contentType, "text/plain") {
 		defer resp.Body.Close()
 		var apiResp APIResponse
 		json.NewDecoder(resp.Body).Decode(&apiResp)

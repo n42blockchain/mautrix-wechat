@@ -176,6 +176,8 @@
 - 2026-03-16 23: Fixed `wecom.Client.DownloadMedia()` to reject non-2xx responses before interpreting body content, and to fall back to `application/octet-stream` when successful responses omit `Content-Type`.
 - 2026-03-16 23: Fixed `pchook.GetUserAvatar()` to infer MIME type from the returned file path instead of hardcoding `image/jpeg`, so PNG avatars now round-trip with the correct content type.
 - 2026-03-16 23: Added `wecom` and `pchook` regression coverage for the media-status/headerless path and avatar MIME detection, then re-ran `go test ./...` and `go vet ./...` successfully.
+- 2026-03-16 23: Hardened `wecom.Client.DownloadMedia()` to treat `application/json; charset=utf-8` and similar parameterized content types as API-error envelopes, avoiding false-success media reads on JSON error bodies.
+- 2026-03-16 23: Added targeted `wecom` coverage for parameterized JSON media errors and re-ran targeted tests successfully.
 
 ## Final Coverage Snapshot
 - `internal/bridge` 54.3%

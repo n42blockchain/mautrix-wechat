@@ -272,6 +272,12 @@ func TestClientDownloadMedia_UsesStatusAndMimeFallback(t *testing.T) {
 					Header:     make(http.Header),
 					Body:       io.NopCloser(strings.NewReader("media-bytes")),
 				}, nil
+			case "json_error":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+					Body:       io.NopCloser(strings.NewReader(`{"errcode":40007,"errmsg":"invalid media_id"}`)),
+				}, nil
 			case "missing":
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
@@ -299,6 +305,9 @@ func TestClientDownloadMedia_UsesStatusAndMimeFallback(t *testing.T) {
 
 	if _, _, err := c.DownloadMedia(context.Background(), "missing"); err == nil || err.Error() != "download media HTTP 404" {
 		t.Fatalf("expected HTTP error, got %v", err)
+	}
+	if _, _, err := c.DownloadMedia(context.Background(), "json_error"); err == nil || err.Error() != "download media failed: [40007] invalid media_id" {
+		t.Fatalf("expected JSON API error, got %v", err)
 	}
 }
 
